@@ -1,7 +1,7 @@
 package main
 
 import (
- "github.com/CyrusJavan/tf-bench/cmd"
+	"github.com/CyrusJavan/tf-bench/cmd"
 )
 
 func main() {
