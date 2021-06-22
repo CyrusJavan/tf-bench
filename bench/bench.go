@@ -16,15 +16,28 @@ const (
 	stateFileName = "terraform.tfstate"
 )
 
+type ResourceReport struct {
+	Name        string        // Name of the resource
+	Count       int           // Count is the number of these resources in the workspace
+	TotalTime   time.Duration // TotalTime is the time for refreshing just these resources
+	AverageTime time.Duration // AverageTime is TotalTime / Count
+}
+
 type Report struct {
-	Timestamp time.Time         // Timestamp is the start of the benchmark
-	TotalTime time.Duration     // TotalTime is the duration to `terraform refresh` the entire workspace
-	Resources []*ResourceReport // Resources is the slice of individual resource measurements
+	Timestamp        time.Time         // Timestamp is the start of the benchmark
+	TotalTime        time.Duration     // TotalTime is the duration to `terraform refresh` the entire workspace
+	TerraformVersion *TerraformVersion // TerraformVersion that is running the benchmark
+	Resources        []*ResourceReport // Resources is the slice of individual resource measurements
 }
 
 func NewReport() *Report {
+	tv, err := terraformVersion()
+	if err != nil {
+		fmt.Printf("WARN: Could not find terraform version: %v\n", err)
+	}
 	return &Report{
-		Timestamp: time.Now(),
+		Timestamp:        time.Now(),
+		TerraformVersion: tv,
 	}
 }
 
@@ -36,18 +49,18 @@ func (r *Report) String() string {
 		t.AppendRow(table.Row{rr.Name, rr.Count, rr.TotalTime, rr.AverageTime})
 	}
 	reportTemplate := `tf-bench Report %s
+terraform version: v%s
+provider versions:
+%s
 Refresh Time for Whole Workspace: %s
 %s`
 	tbl := t.Render()
-	report := fmt.Sprintf(reportTemplate, r.Timestamp.Format(time.RFC3339), r.TotalTime, tbl)
+	providerVersions := ""
+	for k, v := range r.TerraformVersion.ProviderSelections {
+		providerVersions += k + "=" + v + "\n"
+	}
+	report := fmt.Sprintf(reportTemplate, r.Timestamp.Format(time.RFC3339), r.TerraformVersion.TerraformVersion, providerVersions, r.TotalTime, tbl)
 	return report
-}
-
-type ResourceReport struct {
-	Name        string        // Name of the resource
-	Count       int           // Count is the number of these resources in the workspace
-	TotalTime   time.Duration // TotalTime is the time for refreshing just these resources
-	AverageTime time.Duration // AverageTime is TotalTime / Count
 }
 
 // ValidateEnv checks if we can run a benchmark.
@@ -56,13 +69,11 @@ func ValidateEnv() error {
 	if _, err := os.Stat(stateFileName); os.IsNotExist(err) {
 		return fmt.Errorf("could not find state file")
 	}
-	return nil
-}
-
-type TerraformState struct {
-	Resources []struct {
-		Type string
+	tf := exec.Command("terraform", "-help")
+	if err := tf.Run(); err != nil {
+		return fmt.Errorf("could not execute `terraform` command")
 	}
+	return nil
 }
 
 func Benchmark() (*Report, error) {
@@ -70,7 +81,11 @@ func Benchmark() (*Report, error) {
 	if err != nil {
 		return nil, fmt.Errorf("could not read state file: %w", err)
 	}
-	var tfstate TerraformState
+	var tfstate struct {
+		Resources []struct {
+			Type string
+		}
+	}
 	err = json.Unmarshal(state, &tfstate)
 	if err != nil {
 		return nil, fmt.Errorf("could not unmarshal terraform state: %w", err)
@@ -190,4 +205,23 @@ func measureRefresh(dir string) (time.Duration, error) {
 	}
 	end := time.Now()
 	return end.Sub(start), nil
+}
+
+type TerraformVersion struct {
+	TerraformVersion   string            `json:"terraform_version"`
+	ProviderSelections map[string]string `json:"provider_selections"`
+}
+
+func terraformVersion() (*TerraformVersion, error) {
+	version := exec.Command("terraform", "version", "-json")
+	out, err := version.Output()
+	if err != nil {
+		return nil, fmt.Errorf("running terraform version -json command: %w", err)
+	}
+	var tv TerraformVersion
+	err = json.Unmarshal(out, &tv)
+	if err != nil {
+		return nil, fmt.Errorf("unmarshal terraform version output: %w", err)
+	}
+	return &tv, nil
 }
