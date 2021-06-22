@@ -1,15 +1,15 @@
 package bench
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
-	"text/template"
+	"sort"
 	"time"
 
 	"github.com/itchyny/gojq"
+	"github.com/jedib0t/go-pretty/v6/table"
 )
 
 const (
@@ -28,32 +28,19 @@ func NewReport() *Report {
 	}
 }
 
-func ftime(t time.Time) string {
-	return t.Format(time.RFC3339)
-}
-
-var funcMap = template.FuncMap{
-	"ftime": ftime,
-}
-
-var reportTemplate = template.Must(template.New("report").Funcs(funcMap).Parse(`tf-bench report
-timestamp: {{ftime .Timestamp}}
-total refresh time: {{.TotalTime}}
-Per resource stats
-{{range .Resources}}
-name: {{.Name}}
-refresh time: {{.TotalTime}}
-{{end}}
-`))
-
 func (r *Report) String() string {
-	var b bytes.Buffer
-	err := reportTemplate.Execute(&b, r)
-	if err != nil {
-		fmt.Printf("ERROR: failed to execute report template: %v", err)
-		return ""
+	t := table.NewWriter()
+	t.SetTitle("Individual Refresh Statistics")
+	t.AppendHeader(table.Row{"Type", "Count", "Refresh Time", "Refresh Time Per Resource"})
+	for _, rr := range r.Resources {
+		t.AppendRow(table.Row{rr.Name, rr.Count, rr.TotalTime, rr.AverageTime})
 	}
-	return b.String()
+	reportTemplate := `tf-bench Report %s
+Refresh Time for Whole Workspace: %s
+%s`
+	tbl := t.Render()
+	report := fmt.Sprintf(reportTemplate, r.Timestamp.Format(time.RFC3339), r.TotalTime, tbl)
+	return report
 }
 
 type ResourceReport struct {
@@ -89,9 +76,9 @@ func Benchmark() (*Report, error) {
 		return nil, fmt.Errorf("could not unmarshal terraform state: %w", err)
 	}
 	// Move the resources types into a map to deduplicate and count.
-	resourceTypes := map[string]bool{}
+	resourceTypes := map[string]int{}
 	for _, r := range tfstate.Resources {
-		resourceTypes[r.Type] = true
+		resourceTypes[r.Type] += 1
 	}
 
 	report := NewReport()
@@ -103,13 +90,20 @@ func Benchmark() (*Report, error) {
 	report.TotalTime = t
 
 	// Benchmark each resource type individually
-	for r, _ := range resourceTypes {
+	for r, count := range resourceTypes {
 		rr, err := resourceBenchmark(r, state)
 		if err != nil {
 			return nil, fmt.Errorf("could not run individual resource benchmark for resourceType=%s: %w", r, err)
 		}
+		rr.Count = count
+		rr.AverageTime = time.Duration(int64(rr.TotalTime) / int64(rr.Count))
 		report.Resources = append(report.Resources, rr)
 	}
+	// Reverse sort the reports by AverageTime
+	sort.Slice(report.Resources, func(i, j int) bool {
+		return report.Resources[i].AverageTime > report.Resources[j].AverageTime
+	})
+
 	return report, nil
 }
 
