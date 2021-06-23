@@ -19,6 +19,7 @@ import (
 const (
 	stateFileName      = "terraform.tfstate"
 	defaultParallelism = 10
+	clearLine          = "\033[2K"
 )
 
 type ResourceReport struct {
@@ -131,23 +132,27 @@ func Benchmark(skipControllerVersion bool) (*Report, error) {
 
 	report := NewReport(skipControllerVersion)
 	// Run refresh of the entire workspace to get the TotalTime
-	fmt.Println("Starting measurement for whole workspace refresh.")
+	fmt.Print("Starting measurement for whole workspace refresh.")
 	t, err := measureRefresh(".", defaultParallelism)
 	if err != nil {
 		return nil, fmt.Errorf("could not measure refresh for workspace: %w", err)
 	}
 	report.TotalTime = t
+	fmt.Print(clearLine)
+	fmt.Print("\r")
 	fmt.Println("Finished measurement for whole workspace refresh.")
 
 	// Benchmark each resource type individually
 	for r, count := range resourceTypes {
-		fmt.Printf("Starting measurement for individual resource %q refresh.\n", r)
+		fmt.Printf("Starting measurement for individual resource %q refresh.", r)
 		rr, err := resourceBenchmark(&Resource{Name: r, Count: count}, state)
 		if err != nil {
 			return nil, fmt.Errorf("could not run individual resource benchmark for resourceType=%s: %w", r, err)
 		}
 		rr.Count = count
 		report.Resources = append(report.Resources, rr)
+		fmt.Print(clearLine)
+		fmt.Print("\r")
 		fmt.Printf("Finished measurement for individual resource %q refresh.\n", r)
 	}
 
