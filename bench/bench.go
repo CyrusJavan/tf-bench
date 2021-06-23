@@ -3,17 +3,22 @@ package bench
 import (
 	"encoding/json"
 	"fmt"
+	"io/ioutil"
 	"os"
 	"os/exec"
 	"sort"
+	"strconv"
 	"time"
 
+	"github.com/AviatrixSystems/terraform-provider-aviatrix/v2/goaviatrix"
 	"github.com/itchyny/gojq"
 	"github.com/jedib0t/go-pretty/v6/table"
+	log "github.com/sirupsen/logrus"
 )
 
 const (
-	stateFileName = "terraform.tfstate"
+	stateFileName      = "terraform.tfstate"
+	defaultParallelism = 10
 )
 
 type ResourceReport struct {
@@ -24,21 +29,35 @@ type ResourceReport struct {
 }
 
 type Report struct {
-	Timestamp        time.Time         // Timestamp is the start of the benchmark
-	TotalTime        time.Duration     // TotalTime is the duration to `terraform refresh` the entire workspace
-	TerraformVersion *TerraformVersion // TerraformVersion that is running the benchmark
-	Resources        []*ResourceReport // Resources is the slice of individual resource measurements
+	Timestamp         time.Time                   // Timestamp is the start of the benchmark
+	TotalTime         time.Duration               // TotalTime is the duration to `terraform refresh` the entire workspace
+	TerraformVersion  *TerraformVersion           // TerraformVersion that is running the benchmark
+	ControllerVersion *goaviatrix.AviatrixVersion // ControllerVersion of the Aviatrix controller
+	Resources         []*ResourceReport           // Resources is the slice of individual resource measurements
 }
 
-func NewReport() *Report {
+type Resource struct {
+	Name  string
+	Count int
+}
+
+func NewReport(skipControllerVersion bool) *Report {
 	tv, err := terraformVersion()
 	if err != nil {
 		fmt.Printf("WARN: Could not find terraform version: %v\n", err)
 	}
-	return &Report{
+	report := Report{
 		Timestamp:        time.Now(),
 		TerraformVersion: tv,
 	}
+	if !skipControllerVersion {
+		av, err := controllerVersion()
+		if err != nil {
+			fmt.Printf("WARN: Could not find controller version: %v\n", err)
+		}
+		report.ControllerVersion = av
+	}
+	return &report
 }
 
 func (r *Report) String() string {
@@ -49,6 +68,7 @@ func (r *Report) String() string {
 		t.AppendRow(table.Row{rr.Name, rr.Count, rr.TotalTime, rr.AverageTime})
 	}
 	reportTemplate := `tf-bench Report %s
+controller version: v%s
 terraform version: v%s
 provider versions:
 %s
@@ -59,24 +79,41 @@ Refresh Time for Whole Workspace: %s
 	for k, v := range r.TerraformVersion.ProviderSelections {
 		providerVersions += k + "=" + v + "\n"
 	}
-	report := fmt.Sprintf(reportTemplate, r.Timestamp.Format(time.RFC3339), r.TerraformVersion.TerraformVersion, providerVersions, r.TotalTime, tbl)
+	controllerVer := strconv.Itoa(int(r.ControllerVersion.Major)) + "." + strconv.Itoa(int(r.ControllerVersion.Minor)) + "-" + strconv.Itoa(int(r.ControllerVersion.Build))
+	report := fmt.Sprintf(reportTemplate, r.Timestamp.Format(time.RFC3339), controllerVer, r.TerraformVersion.TerraformVersion, providerVersions, r.TotalTime, tbl)
 	return report
 }
 
 // ValidateEnv checks if we can run a benchmark.
-func ValidateEnv() error {
+func ValidateEnv(skipControllerVersion bool) error {
 	// Must be a terraform workspace, so a terraform.tfstate must exist
 	if _, err := os.Stat(stateFileName); os.IsNotExist(err) {
 		return fmt.Errorf("could not find state file")
 	}
+	// Must be able to execute terraform binary
 	tf := exec.Command("terraform", "-help")
 	if err := tf.Run(); err != nil {
 		return fmt.Errorf("could not execute `terraform` command")
 	}
+	// Need Aviatrix environment variables as well if not skipping controller version
+	if !skipControllerVersion {
+		requiredEnvVars := []string{
+			"AVIATRIX_CONTROLLER_IP",
+			"AVIATRIX_USERNAME",
+			"AVIATRIX_PASSWORD",
+		}
+		for _, v := range requiredEnvVars {
+			if _, ok := os.LookupEnv(v); !ok {
+				return fmt.Errorf(`environment variable %s is not set. 
+The environment variables %v must be set to include the controller version in the generated report. 
+Set -skip-controller-version flag to skip including controller version in the report.`, v, requiredEnvVars)
+			}
+		}
+	}
 	return nil
 }
 
-func Benchmark() (*Report, error) {
+func Benchmark(skipControllerVersion bool) (*Report, error) {
 	state, err := os.ReadFile(stateFileName)
 	if err != nil {
 		return nil, fmt.Errorf("could not read state file: %w", err)
@@ -96,9 +133,9 @@ func Benchmark() (*Report, error) {
 		resourceTypes[r.Type] += 1
 	}
 
-	report := NewReport()
+	report := NewReport(skipControllerVersion)
 	// Run refresh of the entire workspace to get the TotalTime
-	t, err := measureRefresh(".")
+	t, err := measureRefresh(".", defaultParallelism)
 	if err != nil {
 		return nil, fmt.Errorf("could not measure refresh for workspace: %w", err)
 	}
@@ -106,7 +143,7 @@ func Benchmark() (*Report, error) {
 
 	// Benchmark each resource type individually
 	for r, count := range resourceTypes {
-		rr, err := resourceBenchmark(r, state)
+		rr, err := resourceBenchmark(&Resource{Name: r, Count: count}, state)
 		if err != nil {
 			return nil, fmt.Errorf("could not run individual resource benchmark for resourceType=%s: %w", r, err)
 		}
@@ -114,15 +151,16 @@ func Benchmark() (*Report, error) {
 		rr.AverageTime = time.Duration(int64(rr.TotalTime) / int64(rr.Count))
 		report.Resources = append(report.Resources, rr)
 	}
-	// Reverse sort the reports by AverageTime
+
+	// Reverse sort the reports by TotalTime
 	sort.Slice(report.Resources, func(i, j int) bool {
-		return report.Resources[i].AverageTime > report.Resources[j].AverageTime
+		return report.Resources[i].TotalTime > report.Resources[j].TotalTime
 	})
 
 	return report, nil
 }
 
-func resourceBenchmark(resourceType string, state []byte) (*ResourceReport, error) {
+func resourceBenchmark(resource *Resource, state []byte) (*ResourceReport, error) {
 	dir := os.TempDir()
 	defer os.RemoveAll(dir)
 	// Copy necessary files to the temp dir
@@ -143,7 +181,7 @@ func resourceBenchmark(resourceType string, state []byte) (*ResourceReport, erro
 	}
 	defer os.Chdir(pwd)
 	// Use gojq to pull out just the resources we want to measure
-	query, err := gojq.Parse(fmt.Sprintf("del(.resources[] | select(.type != \"%s\"))", resourceType))
+	query, err := gojq.Parse(fmt.Sprintf("del(.resources[] | select(.type != \"%s\"))", resource.Name))
 	if err != nil {
 		return nil, fmt.Errorf("could not parse gojq query: %w", err)
 	}
@@ -175,19 +213,19 @@ func resourceBenchmark(resourceType string, state []byte) (*ResourceReport, erro
 		return nil, fmt.Errorf("terraform init: %w", err)
 	}
 	// Measure terraform refresh
-	t, err := measureRefresh(dir)
+	t, err := measureRefresh(dir, resource.Count)
 	if err != nil {
 		return nil, fmt.Errorf("measuring refresh time: %w", err)
 	}
 	return &ResourceReport{
-		Name:        resourceType,
+		Name:        resource.Name,
 		Count:       0,
 		TotalTime:   t,
 		AverageTime: 0,
 	}, nil
 }
 
-func measureRefresh(dir string) (time.Duration, error) {
+func measureRefresh(dir string, parallelism int) (time.Duration, error) {
 	pwd, err := os.Getwd()
 	if err != nil {
 		return 0, fmt.Errorf("could not get current working dir: %w", err)
@@ -197,7 +235,7 @@ func measureRefresh(dir string) (time.Duration, error) {
 		return 0, fmt.Errorf("could not change dir: %w", err)
 	}
 	defer os.Chdir(pwd)
-	c := exec.Command("terraform", "refresh")
+	c := exec.Command("terraform", "refresh", fmt.Sprintf("-parallelism=%d", parallelism))
 	start := time.Now()
 	err = c.Run()
 	if err != nil {
@@ -224,4 +262,20 @@ func terraformVersion() (*TerraformVersion, error) {
 		return nil, fmt.Errorf("unmarshal terraform version output: %w", err)
 	}
 	return &tv, nil
+}
+
+func controllerVersion() (*goaviatrix.AviatrixVersion, error) {
+	username := os.Getenv("AVIATRIX_USERNAME")
+	password := os.Getenv("AVIATRIX_PASSWORD")
+	ip := os.Getenv("AVIATRIX_CONTROLLER_IP")
+	log.SetOutput(ioutil.Discard)
+	client, err := goaviatrix.NewClient(username, password, ip, nil)
+	if err != nil {
+		return nil, fmt.Errorf("could not initialize aviatrix client: %w", err)
+	}
+	_, version, err := client.GetCurrentVersion()
+	if err != nil {
+		return nil, fmt.Errorf("could not get controller version: %w", err)
+	}
+	return version, nil
 }

@@ -2,11 +2,18 @@ package cmd
 
 import (
 	"fmt"
-	"os"
 
 	"github.com/CyrusJavan/tf-bench/bench"
 	"github.com/spf13/cobra"
 )
+
+var (
+	SkipControllerVersion bool
+)
+
+func init() {
+	rootCmd.Flags().BoolVar(&SkipControllerVersion, "skip-controller-version", false, "Skip adding controller version to generated report")
+}
 
 var rootCmd = &cobra.Command{
 	Use:   "tf-bench",
@@ -16,10 +23,10 @@ tf-bench creates a report that details the Terraform refresh
 performance of the current terraform workspace. 
 `,
 	PreRunE: func(cmd *cobra.Command, args []string) error {
-		return bench.ValidateEnv()
+		return bench.ValidateEnv(SkipControllerVersion)
 	},
 	RunE: func(cmd *cobra.Command, args []string) error {
-		report, err := bench.Benchmark()
+		report, err := bench.Benchmark(SkipControllerVersion)
 		if err != nil {
 			return err
 		}
@@ -29,7 +36,5 @@ performance of the current terraform workspace.
 }
 
 func Execute() {
-	if err := rootCmd.Execute(); err != nil {
-		os.Exit(1)
-	}
+	_ = rootCmd.Execute()
 }
