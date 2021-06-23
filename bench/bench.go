@@ -67,8 +67,7 @@ func (r *Report) String() string {
 	for _, rr := range r.Resources {
 		t.AppendRow(table.Row{rr.Name, rr.Count, rr.TotalTime, rr.AverageTime})
 	}
-	reportTemplate := `tf-bench Report %s
-controller version: v%s
+	reportTemplate := `tf-bench Report %s%s
 terraform version: v%s
 provider versions:
 %s
@@ -79,7 +78,10 @@ Refresh Time for Whole Workspace: %s
 	for k, v := range r.TerraformVersion.ProviderSelections {
 		providerVersions += k + "=" + v + "\n"
 	}
-	controllerVer := strconv.Itoa(int(r.ControllerVersion.Major)) + "." + strconv.Itoa(int(r.ControllerVersion.Minor)) + "-" + strconv.Itoa(int(r.ControllerVersion.Build))
+	var controllerVer string
+	if r.ControllerVersion != nil {
+		controllerVer = "\ncontroller version: v" + strconv.Itoa(int(r.ControllerVersion.Major)) + "." + strconv.Itoa(int(r.ControllerVersion.Minor)) + "-" + strconv.Itoa(int(r.ControllerVersion.Build))
+	}
 	report := fmt.Sprintf(reportTemplate, r.Timestamp.Format(time.RFC3339), controllerVer, r.TerraformVersion.TerraformVersion, providerVersions, r.TotalTime, tbl)
 	return report
 }
@@ -91,8 +93,8 @@ func ValidateEnv(skipControllerVersion bool) error {
 		return fmt.Errorf("could not find state file")
 	}
 	// Must be able to execute terraform binary
-	tf := exec.Command("terraform", "-help")
-	if err := tf.Run(); err != nil {
+	_, err := runCommand("terraform", "-help")
+	if err != nil {
 		return fmt.Errorf("could not execute `terraform` command")
 	}
 	// Need Aviatrix environment variables as well if not skipping controller version
@@ -103,10 +105,10 @@ func ValidateEnv(skipControllerVersion bool) error {
 			"AVIATRIX_PASSWORD",
 		}
 		for _, v := range requiredEnvVars {
-			if _, ok := os.LookupEnv(v); !ok {
+			if s := os.Getenv(v); s == "" {
 				return fmt.Errorf(`environment variable %s is not set. 
 The environment variables %v must be set to include the controller version in the generated report. 
-Set -skip-controller-version flag to skip including controller version in the report.`, v, requiredEnvVars)
+Set --skip-controller-version flag to skip including controller version in the report.`, v, requiredEnvVars)
 			}
 		}
 	}
@@ -165,8 +167,7 @@ func resourceBenchmark(resource *Resource, state []byte) (*ResourceReport, error
 	defer os.RemoveAll(dir)
 	// Copy necessary files to the temp dir
 	// TODO is this portable to windows?
-	cp := exec.Command("/bin/sh", "-c", fmt.Sprintf("cp -R .terraform *.tf %s", dir))
-	err := cp.Run()
+	_, err := runCommand("/bin/sh", "-c", fmt.Sprintf("cp -R .terraform *.tf %s", dir))
 	if err != nil {
 		return nil, fmt.Errorf("could not copy files to temp dir: %w", err)
 	}
@@ -207,8 +208,7 @@ func resourceBenchmark(resource *Resource, state []byte) (*ResourceReport, error
 		return nil, fmt.Errorf("writing modified state: %w", err)
 	}
 	// Terraform init
-	initialize := exec.Command("terraform", "init")
-	err = initialize.Run()
+	_, err = runCommand("terraform", "init")
 	if err != nil {
 		return nil, fmt.Errorf("terraform init: %w", err)
 	}
@@ -235,9 +235,8 @@ func measureRefresh(dir string, parallelism int) (time.Duration, error) {
 		return 0, fmt.Errorf("could not change dir: %w", err)
 	}
 	defer os.Chdir(pwd)
-	c := exec.Command("terraform", "refresh", fmt.Sprintf("-parallelism=%d", parallelism))
 	start := time.Now()
-	err = c.Run()
+	_, err = runCommand("terraform", "refresh", fmt.Sprintf("-parallelism=%d", parallelism))
 	if err != nil {
 		return 0, fmt.Errorf("could not run terraform refresh: %w", err)
 	}
@@ -251,8 +250,7 @@ type TerraformVersion struct {
 }
 
 func terraformVersion() (*TerraformVersion, error) {
-	version := exec.Command("terraform", "version", "-json")
-	out, err := version.Output()
+	out, err := runCommand("terraform", "version", "-json")
 	if err != nil {
 		return nil, fmt.Errorf("running terraform version -json command: %w", err)
 	}
@@ -278,4 +276,13 @@ func controllerVersion() (*goaviatrix.AviatrixVersion, error) {
 		return nil, fmt.Errorf("could not get controller version: %w", err)
 	}
 	return version, nil
+}
+
+func runCommand(name string, arg ...string) ([]byte, error) {
+	c := exec.Command(name, arg...)
+	out, err := c.CombinedOutput()
+	if err != nil {
+		return nil, fmt.Errorf("running command: %w output: %s", err, string(out))
+	}
+	return out, nil
 }
