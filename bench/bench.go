@@ -116,19 +116,13 @@ Set --skip-controller-version flag to skip including controller version in the r
 }
 
 func Benchmark(skipControllerVersion bool) (*Report, error) {
-	state, err := os.ReadFile(stateFileName)
+	fmt.Println("Starting benchmark.")
+	tfstate, state, err := terraformState()
 	if err != nil {
-		return nil, fmt.Errorf("could not read state file: %w", err)
+		return nil, err
 	}
-	var tfstate struct {
-		Resources []struct {
-			Type string
-		}
-	}
-	err = json.Unmarshal(state, &tfstate)
-	if err != nil {
-		return nil, fmt.Errorf("could not unmarshal terraform state: %w", err)
-	}
+	fmt.Printf("Found %d resources/data_sources in the state file.\n", len(tfstate.Resources))
+
 	// Move the resources types into a map to deduplicate and count.
 	resourceTypes := map[string]int{}
 	for _, r := range tfstate.Resources {
@@ -137,14 +131,17 @@ func Benchmark(skipControllerVersion bool) (*Report, error) {
 
 	report := NewReport(skipControllerVersion)
 	// Run refresh of the entire workspace to get the TotalTime
+	fmt.Println("Starting measurement for whole workspace refresh.")
 	t, err := measureRefresh(".", defaultParallelism)
 	if err != nil {
 		return nil, fmt.Errorf("could not measure refresh for workspace: %w", err)
 	}
 	report.TotalTime = t
+	fmt.Println("Finished measurement for whole workspace refresh.")
 
 	// Benchmark each resource type individually
 	for r, count := range resourceTypes {
+		fmt.Printf("Starting measurement for individual resource %q refresh.\n", r)
 		rr, err := resourceBenchmark(&Resource{Name: r, Count: count}, state)
 		if err != nil {
 			return nil, fmt.Errorf("could not run individual resource benchmark for resourceType=%s: %w", r, err)
@@ -152,6 +149,7 @@ func Benchmark(skipControllerVersion bool) (*Report, error) {
 		rr.Count = count
 		rr.AverageTime = time.Duration(int64(rr.TotalTime) / int64(rr.Count))
 		report.Resources = append(report.Resources, rr)
+		fmt.Printf("Finsished measurement for individual resource %q refresh.\n", r)
 	}
 
 	// Reverse sort the reports by TotalTime
@@ -285,4 +283,23 @@ func runCommand(name string, arg ...string) ([]byte, error) {
 		return nil, fmt.Errorf("running command: %w output: %s", err, string(out))
 	}
 	return out, nil
+}
+
+type TerraformState struct {
+	Resources []struct {
+		Type string
+	}
+}
+
+func terraformState() (*TerraformState, []byte, error) {
+	state, err := os.ReadFile(stateFileName)
+	if err != nil {
+		return nil, nil, fmt.Errorf("could not read state file: %w", err)
+	}
+	var tfstate TerraformState
+	err = json.Unmarshal(state, &tfstate)
+	if err != nil {
+		return nil, nil, fmt.Errorf("could not unmarshal terraform state: %w", err)
+	}
+	return &tfstate, state, nil
 }
