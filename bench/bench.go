@@ -22,10 +22,9 @@ const (
 )
 
 type ResourceReport struct {
-	Name        string        // Name of the resource
-	Count       int           // Count is the number of these resources in the workspace
-	TotalTime   time.Duration // TotalTime is the time for refreshing just these resources
-	AverageTime time.Duration // AverageTime is TotalTime / Count
+	Name      string        // Name of the resource
+	Count     int           // Count is the number of these resources in the workspace
+	TotalTime time.Duration // TotalTime is the time for refreshing just these resources
 }
 
 type Report struct {
@@ -63,9 +62,9 @@ func NewReport(skipControllerVersion bool) *Report {
 func (r *Report) String() string {
 	t := table.NewWriter()
 	t.SetTitle("Individual Refresh Statistics")
-	t.AppendHeader(table.Row{"Type", "Count", "Refresh Time", "Refresh Time Per Resource"})
+	t.AppendHeader(table.Row{"Type", "Count", "Refresh Time"})
 	for _, rr := range r.Resources {
-		t.AppendRow(table.Row{rr.Name, rr.Count, rr.TotalTime, rr.AverageTime})
+		t.AppendRow(table.Row{rr.Name, rr.Count, rr.TotalTime})
 	}
 	reportTemplate := `tf-bench Report %s%s
 terraform version: v%s
@@ -148,7 +147,6 @@ func Benchmark(skipControllerVersion bool) (*Report, error) {
 			return nil, fmt.Errorf("could not run individual resource benchmark for resourceType=%s: %w", r, err)
 		}
 		rr.Count = count
-		rr.AverageTime = time.Duration(int64(rr.TotalTime) / int64(rr.Count))
 		report.Resources = append(report.Resources, rr)
 		fmt.Printf("Finished measurement for individual resource %q refresh.\n", r)
 	}
@@ -218,10 +216,8 @@ func resourceBenchmark(resource *Resource, state []byte) (*ResourceReport, error
 		return nil, fmt.Errorf("measuring refresh time: %w", err)
 	}
 	return &ResourceReport{
-		Name:        resource.Name,
-		Count:       0,
-		TotalTime:   t,
-		AverageTime: 0,
+		Name:      resource.Name,
+		TotalTime: t,
 	}, nil
 }
 
