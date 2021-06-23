@@ -2,6 +2,8 @@ package cmd
 
 import (
 	"fmt"
+	"os"
+	"time"
 
 	"github.com/CyrusJavan/tf-bench/bench"
 	"github.com/spf13/cobra"
@@ -30,7 +32,15 @@ performance of the current terraform workspace.
 		if err != nil {
 			return err
 		}
-		fmt.Println(report)
+		reportString := report.String()
+		fmt.Println(reportString)
+		// Save report to file as well
+		filename := "tf-bench-report-" + report.Timestamp.Format(time.RFC3339)
+		err = os.WriteFile(filename, []byte(reportString), 0644)
+		if err != nil {
+			return fmt.Errorf("could not write report to file. The report has also been output to the console please recover the report from there: %w", err)
+		}
+		fmt.Printf("Wrote report to file %s\n", filename)
 		return nil
 	},
 }

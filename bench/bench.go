@@ -72,7 +72,8 @@ terraform version: v%s
 provider versions:
 %s
 Refresh Time for Whole Workspace: %s
-%s`
+%s
+`
 	tbl := t.Render()
 	providerVersions := ""
 	for k, v := range r.TerraformVersion.ProviderSelections {
@@ -149,7 +150,7 @@ func Benchmark(skipControllerVersion bool) (*Report, error) {
 		rr.Count = count
 		rr.AverageTime = time.Duration(int64(rr.TotalTime) / int64(rr.Count))
 		report.Resources = append(report.Resources, rr)
-		fmt.Printf("Finsished measurement for individual resource %q refresh.\n", r)
+		fmt.Printf("Finished measurement for individual resource %q refresh.\n", r)
 	}
 
 	// Reverse sort the reports by TotalTime
@@ -157,6 +158,7 @@ func Benchmark(skipControllerVersion bool) (*Report, error) {
 		return report.Resources[i].TotalTime > report.Resources[j].TotalTime
 	})
 
+	fmt.Println("Finished benchmark.")
 	return report, nil
 }
 
