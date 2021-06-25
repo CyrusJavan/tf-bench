@@ -127,7 +127,7 @@ func Benchmark(skipControllerVersion bool) (*Report, error) {
 	// Move the resources types into a map to deduplicate and count.
 	resourceTypes := map[string]int{}
 	for _, r := range tfstate.Resources {
-		resourceTypes[r.Type] += 1
+		resourceTypes[r.Type] += len(r.Instances)
 	}
 
 	report := NewReport(skipControllerVersion)
@@ -290,7 +290,8 @@ func runCommand(name string, arg ...string) ([]byte, error) {
 
 type TerraformState struct {
 	Resources []struct {
-		Type string
+		Type      string
+		Instances []struct{}
 	}
 }
 
