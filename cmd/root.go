@@ -11,10 +11,12 @@ import (
 
 var (
 	SkipControllerVersion bool
+	Iterations            int
 )
 
 func init() {
 	rootCmd.Flags().BoolVar(&SkipControllerVersion, "skip-controller-version", false, "Skip adding controller version to generated report")
+	rootCmd.Flags().IntVar(&Iterations, "iterations", 3, "How many times to run each refresh test. Higher number will be more accurate but slower")
 }
 
 var rootCmd = &cobra.Command{
@@ -28,7 +30,12 @@ performance of the current terraform workspace.
 		return bench.ValidateEnv(SkipControllerVersion)
 	},
 	RunE: func(cmd *cobra.Command, args []string) error {
-		report, err := bench.Benchmark(SkipControllerVersion)
+		cfg := &bench.Config{
+			SkipControllerVersion: SkipControllerVersion,
+			Iterations:            Iterations,
+		}
+		fmt.Printf("Starting benchmark with configuration=%+v\n", cfg)
+		report, err := bench.Benchmark(cfg)
 		if err != nil {
 			return err
 		}

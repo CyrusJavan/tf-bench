@@ -22,6 +22,11 @@ const (
 	clearLine          = "\033[2K"
 )
 
+type Config struct {
+	SkipControllerVersion bool
+	Iterations            int
+}
+
 type ResourceReport struct {
 	Name      string        // Name of the resource
 	Count     int           // Count is the number of these resources in the workspace
@@ -34,6 +39,7 @@ type Report struct {
 	TerraformVersion  *TerraformVersion           // TerraformVersion that is running the benchmark
 	ControllerVersion *goaviatrix.AviatrixVersion // ControllerVersion of the Aviatrix controller
 	Resources         []*ResourceReport           // Resources is the slice of individual resource measurements
+	Config            *Config                     // Config that this report was generated with
 }
 
 type Resource struct {
@@ -41,7 +47,7 @@ type Resource struct {
 	Count int
 }
 
-func NewReport(skipControllerVersion bool) *Report {
+func NewReport(cfg *Config) *Report {
 	tv, err := terraformVersion()
 	if err != nil {
 		fmt.Printf("WARN: Could not find terraform version: %v\n", err)
@@ -49,8 +55,9 @@ func NewReport(skipControllerVersion bool) *Report {
 	report := Report{
 		Timestamp:        time.Now(),
 		TerraformVersion: tv,
+		Config:           cfg,
 	}
-	if !skipControllerVersion {
+	if !cfg.SkipControllerVersion {
 		av, err := controllerVersion()
 		if err != nil {
 			fmt.Printf("WARN: Could not find controller version: %v\n", err)
@@ -68,6 +75,7 @@ func (r *Report) String() string {
 		t.AppendRow(table.Row{rr.Name, rr.Count, rr.TotalTime})
 	}
 	reportTemplate := `tf-bench Report %s%s
+iterations per measurement: %d
 terraform version: v%s
 provider versions:
 %s
@@ -83,7 +91,7 @@ Refresh Time for Whole Workspace: %s
 	if r.ControllerVersion != nil {
 		controllerVer = "\ncontroller version: v" + strconv.Itoa(int(r.ControllerVersion.Major)) + "." + strconv.Itoa(int(r.ControllerVersion.Minor)) + "-" + strconv.Itoa(int(r.ControllerVersion.Build))
 	}
-	report := fmt.Sprintf(reportTemplate, r.Timestamp.Format(time.RFC3339), controllerVer, r.TerraformVersion.TerraformVersion, providerVersions, r.TotalTime, tbl)
+	report := fmt.Sprintf(reportTemplate, r.Timestamp.Format(time.RFC3339), controllerVer, r.Config.Iterations, r.TerraformVersion.TerraformVersion, providerVersions, r.TotalTime, tbl)
 	return report
 }
 
@@ -116,8 +124,7 @@ Set --skip-controller-version flag to skip including controller version in the r
 	return nil
 }
 
-func Benchmark(skipControllerVersion bool) (*Report, error) {
-	fmt.Println("Starting benchmark.")
+func Benchmark(cfg *Config) (*Report, error) {
 	tfstate, state, err := terraformState()
 	if err != nil {
 		return nil, err
@@ -130,10 +137,10 @@ func Benchmark(skipControllerVersion bool) (*Report, error) {
 		resourceTypes[r.Type] += len(r.Instances)
 	}
 
-	report := NewReport(skipControllerVersion)
+	report := NewReport(cfg)
 	// Run refresh of the entire workspace to get the TotalTime
 	fmt.Print("Starting measurement for whole workspace refresh.")
-	t, err := measureRefresh(".", defaultParallelism)
+	t, err := measureRefresh(".", defaultParallelism, cfg.Iterations)
 	if err != nil {
 		return nil, fmt.Errorf("could not measure refresh for workspace: %w", err)
 	}
@@ -145,7 +152,7 @@ func Benchmark(skipControllerVersion bool) (*Report, error) {
 	// Benchmark each resource type individually
 	for r, count := range resourceTypes {
 		fmt.Printf("Starting measurement for individual resource %q refresh.", r)
-		rr, err := resourceBenchmark(&Resource{Name: r, Count: count}, state)
+		rr, err := resourceBenchmark(cfg, &Resource{Name: r, Count: count}, state)
 		if err != nil {
 			return nil, fmt.Errorf("could not run individual resource benchmark for resourceType=%s: %w", r, err)
 		}
@@ -165,7 +172,7 @@ func Benchmark(skipControllerVersion bool) (*Report, error) {
 	return report, nil
 }
 
-func resourceBenchmark(resource *Resource, state []byte) (*ResourceReport, error) {
+func resourceBenchmark(cfg *Config, resource *Resource, state []byte) (*ResourceReport, error) {
 	dir := os.TempDir()
 	defer os.RemoveAll(dir)
 	// Copy necessary files to the temp dir
@@ -216,7 +223,7 @@ func resourceBenchmark(resource *Resource, state []byte) (*ResourceReport, error
 		return nil, fmt.Errorf("terraform init: %w", err)
 	}
 	// Measure terraform refresh
-	t, err := measureRefresh(dir, resource.Count)
+	t, err := measureRefresh(dir, resource.Count, cfg.Iterations)
 	if err != nil {
 		return nil, fmt.Errorf("measuring refresh time: %w", err)
 	}
@@ -226,7 +233,19 @@ func resourceBenchmark(resource *Resource, state []byte) (*ResourceReport, error
 	}, nil
 }
 
-func measureRefresh(dir string, parallelism int) (time.Duration, error) {
+func measureRefresh(dir string, parallelism, iterations int) (time.Duration, error) {
+	var total time.Duration
+	for i := 0; i < iterations; i++ {
+		one, err := measureRefreshOnce(dir, parallelism)
+		if err != nil {
+			return 0, err
+		}
+		total += one
+	}
+	return time.Duration(int64(total) / int64(iterations)), nil
+}
+
+func measureRefreshOnce(dir string, parallelism int) (time.Duration, error) {
 	pwd, err := os.Getwd()
 	if err != nil {
 		return 0, fmt.Errorf("could not get current working dir: %w", err)
