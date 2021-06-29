@@ -1,3 +1,6 @@
 tf-bench
 .DS_Store
 dist
+terraform.tfstate*
+.terraform
+tf-bench-report*

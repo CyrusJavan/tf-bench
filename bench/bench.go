@@ -6,11 +6,14 @@ import (
 	"io/ioutil"
 	"os"
 	"os/exec"
+	"regexp"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/AviatrixSystems/terraform-provider-aviatrix/v2/goaviatrix"
+	"github.com/hashicorp/go-version"
 	"github.com/itchyny/gojq"
 	"github.com/jedib0t/go-pretty/v6/table"
 	log "github.com/sirupsen/logrus"
@@ -75,23 +78,27 @@ func (r *Report) String() string {
 		t.AppendRow(table.Row{rr.Name, rr.Count, rr.TotalTime})
 	}
 	reportTemplate := `tf-bench Report %s%s
-iterations per measurement: %d
-terraform version: v%s
-provider versions:
-%s
+iterations per measurement: %d%s%s
 Refresh Time for Whole Workspace: %s
 %s
 `
 	tbl := t.Render()
 	providerVersions := ""
-	for k, v := range r.TerraformVersion.ProviderSelections {
-		providerVersions += k + "=" + v + "\n"
+	if r.TerraformVersion != nil {
+		providerVersions = "\nprovider versions:\n"
+		for k, v := range r.TerraformVersion.ProviderSelections {
+			providerVersions += k + "=" + v + "\n"
+		}
 	}
 	var controllerVer string
 	if r.ControllerVersion != nil {
 		controllerVer = "\ncontroller version: v" + strconv.Itoa(int(r.ControllerVersion.Major)) + "." + strconv.Itoa(int(r.ControllerVersion.Minor)) + "-" + strconv.Itoa(int(r.ControllerVersion.Build))
 	}
-	report := fmt.Sprintf(reportTemplate, r.Timestamp.Format(time.RFC3339), controllerVer, r.Config.Iterations, r.TerraformVersion.TerraformVersion, providerVersions, r.TotalTime, tbl)
+	var terraformVer string
+	if r.TerraformVersion != nil {
+		terraformVer = "\nterraform version: v" + r.TerraformVersion.TerraformVersion
+	}
+	report := fmt.Sprintf(reportTemplate, r.Timestamp.Format(time.RFC3339), controllerVer, r.Config.Iterations, terraformVer, providerVersions, r.TotalTime, tbl)
 	return report
 }
 
@@ -269,6 +276,13 @@ type TerraformVersion struct {
 	ProviderSelections map[string]string `json:"provider_selections"`
 }
 
+var (
+	simpleVersionRe = `v?(?P<version>[0-9]+(?:\.[0-9]+)*(?:-[A-Za-z0-9\.]+)?)`
+
+	versionOutputRe         = regexp.MustCompile(`^Terraform ` + simpleVersionRe)
+	providerVersionOutputRe = regexp.MustCompile(`(\n\+ provider[\. ](?P<name>\S+) ` + simpleVersionRe + `)`)
+)
+
 func terraformVersion() (*TerraformVersion, error) {
 	out, err := runCommand("terraform", "version", "-json")
 	if err != nil {
@@ -277,9 +291,54 @@ func terraformVersion() (*TerraformVersion, error) {
 	var tv TerraformVersion
 	err = json.Unmarshal(out, &tv)
 	if err != nil {
-		return nil, fmt.Errorf("unmarshal terraform version output: %w", err)
+		// Couldn't unmarshal, could be on old Terraform that does not
+		// support -json output.
+		v, pv, err := parseOldVersionOutput(string(out))
+		if err != nil {
+			return nil, fmt.Errorf("parsing terraform version output: %w", err)
+		}
+		pvs := map[string]string{}
+		for k, v := range pv {
+			pvs[k] = v.String()
+		}
+		tv = TerraformVersion{
+			TerraformVersion:   v.String(),
+			ProviderSelections: pvs,
+		}
 	}
 	return &tv, nil
+}
+
+// From: github.com/hashicorp/terraform-exec/tfexec/version.go
+func parseOldVersionOutput(stdout string) (*version.Version, map[string]*version.Version, error) {
+	stdout = strings.TrimSpace(stdout)
+
+	submatches := versionOutputRe.FindStringSubmatch(stdout)
+	if len(submatches) != 2 {
+		return nil, nil, fmt.Errorf("unexpected number of version matches %d for %s", len(submatches), stdout)
+	}
+	v, err := version.NewVersion(submatches[1])
+	if err != nil {
+		return nil, nil, fmt.Errorf("unable to parse version %q: %w", submatches[1], err)
+	}
+
+	allSubmatches := providerVersionOutputRe.FindAllStringSubmatch(stdout, -1)
+	provV := map[string]*version.Version{}
+
+	for _, submatches := range allSubmatches {
+		if len(submatches) != 4 {
+			return nil, nil, fmt.Errorf("unexpected number of providerion version matches %d for %s", len(submatches), stdout)
+		}
+
+		v, err := version.NewVersion(submatches[3])
+		if err != nil {
+			return nil, nil, fmt.Errorf("unable to parse provider version %q: %w", submatches[3], err)
+		}
+
+		provV[submatches[2]] = v
+	}
+
+	return v, provV, err
 }
 
 func controllerVersion() (*goaviatrix.AviatrixVersion, error) {
