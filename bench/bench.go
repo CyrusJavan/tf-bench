@@ -104,10 +104,6 @@ Refresh Time for Whole Workspace: %s
 
 // ValidateEnv checks if we can run a benchmark.
 func ValidateEnv(skipControllerVersion bool) error {
-	// Must be a terraform workspace, so a terraform.tfstate must exist
-	if _, err := os.Stat(stateFileName); os.IsNotExist(err) {
-		return fmt.Errorf("could not find state file")
-	}
 	// Must be able to execute terraform binary
 	_, err := runCommand("terraform", "-help")
 	if err != nil {
@@ -182,12 +178,6 @@ func Benchmark(cfg *Config) (*Report, error) {
 func resourceBenchmark(cfg *Config, resource *Resource, state []byte) (*ResourceReport, error) {
 	dir := os.TempDir()
 	defer os.RemoveAll(dir)
-	// Copy necessary files to the temp dir
-	// TODO is this portable to windows?
-	_, err := runCommand("/bin/sh", "-c", fmt.Sprintf("cp -R .terraform *.tf %s", dir))
-	if err != nil {
-		return nil, fmt.Errorf("could not copy files to temp dir: %w", err)
-	}
 	// Change dir into the temp dir
 	pwd, err := os.Getwd()
 	if err != nil {
@@ -223,6 +213,18 @@ func resourceBenchmark(cfg *Config, resource *Resource, state []byte) (*Resource
 	err = os.WriteFile(stateFileName, modifiedState, 0644)
 	if err != nil {
 		return nil, fmt.Errorf("writing modified state: %w", err)
+	}
+	var dummyTfFileContent string
+	if strings.HasPrefix(resource.Name, "aviatrix") {
+		dummyTfFileContent = `
+provider "aviatrix" {
+  skip_version_validation = true
+}
+`
+	}
+	err = os.WriteFile("main.tf", []byte(dummyTfFileContent), 0644)
+	if err != nil {
+		return nil, fmt.Errorf("writing empty tf file: %w", err)
 	}
 	// Terraform init
 	_, err = runCommand("terraform", "init")
@@ -374,7 +376,7 @@ type TerraformState struct {
 }
 
 func terraformState() (*TerraformState, []byte, error) {
-	state, err := os.ReadFile(stateFileName)
+	state, err := runCommand("terraform", "state", "pull")
 	if err != nil {
 		return nil, nil, fmt.Errorf("could not read state file: %w", err)
 	}
