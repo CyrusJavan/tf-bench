@@ -1,16 +1,19 @@
-terraform {
-  backend "s3" {
-    bucket = "my-tf-test-bucket-randombits"
-    key    = "s3-backend-test/tfstate"
-    region = "us-east-1"
-  }
-}
 resource "random_id" "id" {
   count       = 10
   byte_length = 16
 }
-resource "random_pet" "pet" {
-  count = 10
+provider "aws" {
+  version = "~> 3.0"
+  region  = "us-east-1"
+}
+resource "aws_s3_bucket" "b" {
+  bucket = "my-tf-test-bucket-${random_id.id[0].dec}"
+  acl    = "private"
+
+  tags = {
+    Name        = "My bucket"
+    Environment = "Dev"
+  }
 }
 terraform {
   required_providers {

@@ -132,13 +132,18 @@ func Benchmark(cfg *Config) (*Report, error) {
 	if err != nil {
 		return nil, err
 	}
-	fmt.Printf("Found %d resources/data_sources in the state file.\n", len(tfstate.Resources))
 
 	// Move the resources types into a map to deduplicate and count.
 	resourceTypes := map[string]int{}
 	for _, r := range tfstate.Resources {
 		resourceTypes[r.Type] += len(r.Instances)
 	}
+
+	var totalCount int
+	for _, v := range resourceTypes {
+		totalCount += v
+	}
+	fmt.Printf("Found %d resources/data_sources in the state file.\n", totalCount)
 
 	report := NewReport(cfg)
 	// Run refresh of the entire workspace to get the TotalTime
@@ -155,9 +160,10 @@ func Benchmark(cfg *Config) (*Report, error) {
 	// Benchmark each resource type individually
 	for r, count := range resourceTypes {
 		fmt.Printf("Starting measurement for individual resource %q refresh.", r)
-		rr, err := resourceBenchmark(cfg, &Resource{Name: r, Count: count}, state)
+		rr, err := resourceBenchmark(cfg, &Resource{Name: r, Count: count}, state, report.TerraformVersion)
 		if err != nil {
-			return nil, fmt.Errorf("could not run individual resource benchmark for resourceType=%s: %w", r, err)
+			fmt.Printf("During the individual resource benchmark for resourceType=%s the following error occured: %v", r, err)
+			continue
 		}
 		rr.Count = count
 		report.Resources = append(report.Resources, rr)
@@ -175,7 +181,7 @@ func Benchmark(cfg *Config) (*Report, error) {
 	return report, nil
 }
 
-func resourceBenchmark(cfg *Config, resource *Resource, state []byte) (*ResourceReport, error) {
+func resourceBenchmark(cfg *Config, resource *Resource, state []byte, tfv *TerraformVersion) (*ResourceReport, error) {
 	dir := os.TempDir()
 	defer os.RemoveAll(dir)
 	// Change dir into the temp dir
@@ -215,10 +221,30 @@ func resourceBenchmark(cfg *Config, resource *Resource, state []byte) (*Resource
 		return nil, fmt.Errorf("writing modified state: %w", err)
 	}
 	var dummyTfFileContent string
-	if strings.HasPrefix(resource.Name, "aviatrix") {
+	if strings.HasPrefix(resource.Name, "aviatrix_") {
 		dummyTfFileContent = `
 provider "aviatrix" {
   skip_version_validation = true
+}
+`
+		v, _ := version.NewVersion(tfv.TerraformVersion)
+		v13, _ := version.NewVersion("v0.13.0")
+		if v.GreaterThanOrEqual(v13) {
+			dummyTfFileContent += `
+terraform {
+  required_providers {
+    aviatrix = {
+      source  = "aviatrixsystems/aviatrix"
+    }
+  }
+}
+`
+		}
+	} else if strings.HasPrefix(resource.Name, "aws_") {
+		dummyTfFileContent = `
+provider "aws" {
+  version = "~> 3.0"
+  region  = "us-east-1"
 }
 `
 	}
