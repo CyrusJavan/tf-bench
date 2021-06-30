@@ -4,3 +4,4 @@ dist
 terraform.tfstate*
 .terraform
 tf-bench-report*
+testing.tfvars

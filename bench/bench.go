@@ -6,6 +6,7 @@ import (
 	"io/ioutil"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
@@ -14,6 +15,8 @@ import (
 
 	"github.com/AviatrixSystems/terraform-provider-aviatrix/v2/goaviatrix"
 	"github.com/hashicorp/go-version"
+	"github.com/hashicorp/hcl/v2"
+	"github.com/hashicorp/hcl/v2/hclwrite"
 	"github.com/itchyny/gojq"
 	"github.com/jedib0t/go-pretty/v6/table"
 	log "github.com/sirupsen/logrus"
@@ -23,6 +26,10 @@ const (
 	stateFileName      = "terraform.tfstate"
 	defaultParallelism = 10
 	clearLine          = "\033[2K"
+)
+
+var (
+	modifiedTf []byte
 )
 
 type Config struct {
@@ -161,7 +168,7 @@ func Benchmark(cfg *Config) (*Report, error) {
 	// Benchmark each resource type individually
 	for r, count := range resourceTypes {
 		fmt.Printf("Starting measurement for individual resource %q refresh.", r)
-		rr, err := resourceBenchmark(cfg, &Resource{Name: r, Count: count}, state, report.TerraformVersion)
+		rr, err := resourceBenchmark(cfg, &Resource{Name: r, Count: count}, state)
 		if err != nil {
 			fmt.Printf("During the individual resource benchmark for resourceType=%s the following error occured: %v", r, err)
 			continue
@@ -182,9 +189,19 @@ func Benchmark(cfg *Config) (*Report, error) {
 	return report, nil
 }
 
-func resourceBenchmark(cfg *Config, resource *Resource, state []byte, tfv *TerraformVersion) (*ResourceReport, error) {
+func resourceBenchmark(cfg *Config, resource *Resource, state []byte) (*ResourceReport, error) {
 	dir := os.TempDir()
 	defer os.RemoveAll(dir)
+	// Copy over any tfvars or tfvars.json files
+	_, _ = runCommand("/bin/sh", "-c", fmt.Sprintf("cp -R *.tfvars *.tfvars.json %s", dir))
+	// Generate the modified TF file if this is the first time
+	if modifiedTf == nil {
+		var err error
+		modifiedTf, err = createModifiedTerraformConfiguration()
+		if err != nil {
+			return nil, fmt.Errorf("creating modified tf file: %w", err)
+		}
+	}
 	// Change dir into the temp dir
 	pwd, err := os.Getwd()
 	if err != nil {
@@ -195,6 +212,11 @@ func resourceBenchmark(cfg *Config, resource *Resource, state []byte, tfv *Terra
 		return nil, fmt.Errorf("could not change dir: %w", err)
 	}
 	defer os.Chdir(pwd)
+	// Write the modified tf file
+	err = os.WriteFile("main.tf", modifiedTf, 0644)
+	if err != nil {
+		return nil, fmt.Errorf("writing modified tf file: %w", err)
+	}
 	// Use gojq to pull out just the resources we want to measure
 	query, err := gojq.Parse(fmt.Sprintf("del(.resources[] | select(.type != \"%s\"))", resource.Name))
 	if err != nil {
@@ -221,45 +243,13 @@ func resourceBenchmark(cfg *Config, resource *Resource, state []byte, tfv *Terra
 	if err != nil {
 		return nil, fmt.Errorf("writing modified state: %w", err)
 	}
-	var dummyTfFileContent string
-	if strings.HasPrefix(resource.Name, "aviatrix_") {
-		dummyTfFileContent = `
-provider "aviatrix" {
-  skip_version_validation = true
-}
-`
-		v, _ := version.NewVersion(tfv.TerraformVersion)
-		v13, _ := version.NewVersion("v0.13.0")
-		if v.GreaterThanOrEqual(v13) {
-			dummyTfFileContent += `
-terraform {
-  required_providers {
-    aviatrix = {
-      source  = "aviatrixsystems/aviatrix"
-    }
-  }
-}
-`
-		}
-	} else if strings.HasPrefix(resource.Name, "aws_") {
-		dummyTfFileContent = `
-provider "aws" {
-  version = "~> 3.0"
-  region  = "us-east-1"
-}
-`
-	}
-	err = os.WriteFile("main.tf", []byte(dummyTfFileContent), 0644)
-	if err != nil {
-		return nil, fmt.Errorf("writing empty tf file: %w", err)
-	}
 	// Terraform init
 	_, err = runCommand("terraform", "init")
 	if err != nil {
 		return nil, fmt.Errorf("terraform init: %w", err)
 	}
 	// Measure terraform refresh
-	t, err := measureRefresh(dir, resource.Count, cfg.Iterations, "")
+	t, err := measureRefresh(dir, resource.Count, cfg.Iterations, cfg.VarFile)
 	if err != nil {
 		return nil, fmt.Errorf("measuring refresh time: %w", err)
 	}
@@ -420,4 +410,44 @@ func terraformState() (*TerraformState, []byte, error) {
 		return nil, nil, fmt.Errorf("could not unmarshal terraform state: %w", err)
 	}
 	return &tfstate, state, nil
+}
+
+func createModifiedTerraformConfiguration() ([]byte, error) {
+	// We want to build a tf file that contains just these block types:
+	// variable
+	// provider
+	// terraform
+	tfFiles, err := filepath.Glob("*.tf")
+	if err != nil {
+		fmt.Printf("WARN filepath.Glob: %v\n", err)
+	}
+	modifiedTfFile := hclwrite.NewEmptyFile()
+	for _, name := range tfFiles {
+		fileContent, err := os.ReadFile(name)
+		if err != nil {
+			return nil, fmt.Errorf("could not read tf file %s: %w", name, err)
+		}
+		f, diags := hclwrite.ParseConfig(fileContent, name, hcl.InitialPos)
+		if diags.HasErrors() {
+			return nil, fmt.Errorf("parsing tf file %s: %s", name, diags.Error())
+		}
+		blocks := f.Body().Blocks()
+		for _, block := range blocks {
+			if block.Type() == "variable" || block.Type() == "provider" || block.Type() == "terraform" {
+				if block.Type() == "terraform" {
+					tfBlocks := block.Body().Blocks()
+					for _, tfBlock := range tfBlocks {
+						// Remove the backend block to force the
+						// use of the local tfstate file.
+						if tfBlock.Type() == "backend" {
+							block.Body().RemoveBlock(tfBlock)
+							break
+						}
+					}
+				}
+				modifiedTfFile.Body().AppendBlock(block)
+			}
+		}
+	}
+	return modifiedTfFile.Bytes(), nil
 }
