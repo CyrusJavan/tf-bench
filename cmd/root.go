@@ -12,11 +12,13 @@ import (
 var (
 	SkipControllerVersion bool
 	Iterations            int
+	VarFile               string
 )
 
 func init() {
 	rootCmd.Flags().BoolVar(&SkipControllerVersion, "skip-controller-version", false, "Skip adding controller version to generated report")
 	rootCmd.Flags().IntVar(&Iterations, "iterations", 3, "How many times to run each refresh test. Higher number will be more accurate but slower")
+	rootCmd.Flags().StringVar(&VarFile, "var-file", "", "var-file to pass to terraform commands")
 }
 
 var rootCmd = &cobra.Command{
@@ -33,6 +35,7 @@ performance of the current terraform workspace.
 		cfg := &bench.Config{
 			SkipControllerVersion: SkipControllerVersion,
 			Iterations:            Iterations,
+			VarFile:               VarFile,
 		}
 		fmt.Printf("Starting benchmark with configuration=%+v\n", cfg)
 		report, err := bench.Benchmark(cfg)

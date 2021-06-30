@@ -28,6 +28,7 @@ const (
 type Config struct {
 	SkipControllerVersion bool
 	Iterations            int
+	VarFile               string
 }
 
 type ResourceReport struct {
@@ -148,7 +149,7 @@ func Benchmark(cfg *Config) (*Report, error) {
 	report := NewReport(cfg)
 	// Run refresh of the entire workspace to get the TotalTime
 	fmt.Print("Starting measurement for whole workspace refresh.")
-	t, err := measureRefresh(".", defaultParallelism, cfg.Iterations)
+	t, err := measureRefresh(".", defaultParallelism, cfg.Iterations, cfg.VarFile)
 	if err != nil {
 		return nil, fmt.Errorf("could not measure refresh for workspace: %w", err)
 	}
@@ -258,7 +259,7 @@ provider "aws" {
 		return nil, fmt.Errorf("terraform init: %w", err)
 	}
 	// Measure terraform refresh
-	t, err := measureRefresh(dir, resource.Count, cfg.Iterations)
+	t, err := measureRefresh(dir, resource.Count, cfg.Iterations, "")
 	if err != nil {
 		return nil, fmt.Errorf("measuring refresh time: %w", err)
 	}
@@ -268,10 +269,10 @@ provider "aws" {
 	}, nil
 }
 
-func measureRefresh(dir string, parallelism, iterations int) (time.Duration, error) {
+func measureRefresh(dir string, parallelism, iterations int, varFile string) (time.Duration, error) {
 	var total time.Duration
 	for i := 0; i < iterations; i++ {
-		one, err := measureRefreshOnce(dir, parallelism)
+		one, err := measureRefreshOnce(dir, parallelism, varFile)
 		if err != nil {
 			return 0, err
 		}
@@ -280,7 +281,7 @@ func measureRefresh(dir string, parallelism, iterations int) (time.Duration, err
 	return time.Duration(int64(total) / int64(iterations)), nil
 }
 
-func measureRefreshOnce(dir string, parallelism int) (time.Duration, error) {
+func measureRefreshOnce(dir string, parallelism int, varFile string) (time.Duration, error) {
 	pwd, err := os.Getwd()
 	if err != nil {
 		return 0, fmt.Errorf("could not get current working dir: %w", err)
@@ -291,7 +292,14 @@ func measureRefreshOnce(dir string, parallelism int) (time.Duration, error) {
 	}
 	defer os.Chdir(pwd)
 	start := time.Now()
-	_, err = runCommand("terraform", "refresh", fmt.Sprintf("-parallelism=%d", parallelism))
+	args := []string{
+		"refresh",
+		fmt.Sprintf("-parallelism=%d", parallelism),
+	}
+	if varFile != "" {
+		args = append(args, fmt.Sprintf("-var-file=%s", varFile))
+	}
+	_, err = runCommand("terraform", args...)
 	if err != nil {
 		return 0, fmt.Errorf("could not run terraform refresh: %w", err)
 	}
