@@ -260,6 +260,11 @@ func resourceBenchmark(cfg *Config, resource *Resource, state []byte) (*Resource
 }
 
 func measureRefresh(dir string, parallelism, iterations int, varFile string) (time.Duration, error) {
+	// I've noticed some inflated results and it seems that
+	// Terraform is doing some extra work when running an initial
+	// Terraform refresh. So, we will throw out the result of the
+	// first Terraform refresh.
+	_, _ = measureRefreshOnce(dir, parallelism, varFile)
 	var total time.Duration
 	for i := 0; i < iterations; i++ {
 		one, err := measureRefreshOnce(dir, parallelism, varFile)
@@ -281,7 +286,6 @@ func measureRefreshOnce(dir string, parallelism int, varFile string) (time.Durat
 		return 0, fmt.Errorf("could not change dir: %w", err)
 	}
 	defer os.Chdir(pwd)
-	start := time.Now()
 	args := []string{
 		"refresh",
 		fmt.Sprintf("-parallelism=%d", parallelism),
@@ -289,11 +293,12 @@ func measureRefreshOnce(dir string, parallelism int, varFile string) (time.Durat
 	if varFile != "" {
 		args = append(args, fmt.Sprintf("-var-file=%s", varFile))
 	}
+	start := time.Now()
 	_, err = runCommand("terraform", args...)
+	end := time.Now()
 	if err != nil {
 		return 0, fmt.Errorf("could not run terraform refresh: %w", err)
 	}
-	end := time.Now()
 	return end.Sub(start), nil
 }
 
