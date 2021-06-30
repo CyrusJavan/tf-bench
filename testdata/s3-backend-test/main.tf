@@ -15,7 +15,7 @@ resource "random_pet" "pet" {
 terraform {
   required_providers {
     aviatrix = {
-      source  = "aviatrixsystems/aviatrix"
+      source = "aviatrixsystems/aviatrix"
     }
   }
 }

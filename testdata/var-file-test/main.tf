@@ -25,6 +25,9 @@ terraform {
     google = {
       version = "3.74.0"
     }
+    azurerm = {
+      version = "2.65.0"
+    }
   }
   backend "s3" {
     bucket = "my-tf-test-bucket-randombits"
@@ -54,4 +57,11 @@ provider "google" {
 resource "google_service_account" "default" {
   account_id   = "my-service-acc"
   display_name = "Service Account"
+}
+provider "azurerm" {
+  features {}
+}
+resource "azurerm_resource_group" "example" {
+  name     = "example-resources"
+  location = "West Europe"
 }

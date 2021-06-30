@@ -18,7 +18,7 @@ resource "aws_s3_bucket" "b" {
 terraform {
   required_providers {
     aviatrix = {
-      source  = "aviatrixsystems/aviatrix"
+      source = "aviatrixsystems/aviatrix"
     }
   }
 }
