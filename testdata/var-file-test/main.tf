@@ -3,7 +3,7 @@ resource "random_id" "id" {
   byte_length = 16
 }
 provider "aws" {
-  region  = "us-east-1"
+  region = "us-east-1"
 }
 resource "aws_s3_bucket" "b" {
   bucket = "my-tf-test-bucket-${random_id.id[0].dec}"
@@ -21,6 +21,9 @@ terraform {
     }
     aws = {
       version = "~> 3.0"
+    }
+    google = {
+      version = "3.74.0"
     }
   }
   backend "s3" {
@@ -43,4 +46,12 @@ resource "aviatrix_vpc" "aws_vpc" {
   cidr                 = "10.0.0.0/16"
   aviatrix_transit_vpc = false
   aviatrix_firenet_vpc = false
+}
+provider "google" {
+  project = var.google_project_id
+  region  = var.google_region
+}
+resource "google_service_account" "default" {
+  account_id   = "my-service-acc"
+  display_name = "Service Account"
 }
