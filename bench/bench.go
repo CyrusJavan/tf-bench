@@ -28,10 +28,6 @@ const (
 	clearLine          = "\033[2K"
 )
 
-var (
-	modifiedTf []byte
-)
-
 type Config struct {
 	SkipControllerVersion bool
 	Iterations            int
@@ -194,14 +190,12 @@ func resourceBenchmark(cfg *Config, resource *Resource, state []byte) (*Resource
 	defer os.RemoveAll(dir)
 	// Copy over any tfvars or tfvars.json files
 	_, _ = runCommand("/bin/sh", "-c", fmt.Sprintf("cp -R *.tfvars *.tfvars.json %s", dir))
-	// Generate the modified TF file if this is the first time
-	if modifiedTf == nil {
-		var err error
-		modifiedTf, err = createModifiedTerraformConfiguration()
-		if err != nil {
-			return nil, fmt.Errorf("creating modified tf file: %w", err)
-		}
+	// Generate the modified TF file
+	modifiedTf, err := createModifiedTerraformConfiguration(resource)
+	if err != nil {
+		return nil, fmt.Errorf("creating modified tf file: %w", err)
 	}
+
 	// Change dir into the temp dir
 	pwd, err := os.Getwd()
 	if err != nil {
@@ -417,7 +411,7 @@ func terraformState() (*TerraformState, []byte, error) {
 	return &tfstate, state, nil
 }
 
-func createModifiedTerraformConfiguration() ([]byte, error) {
+func createModifiedTerraformConfiguration(resource *Resource) ([]byte, error) {
 	// We want to build a tf file that contains just these block types:
 	// variable
 	// provider
@@ -438,6 +432,7 @@ func createModifiedTerraformConfiguration() ([]byte, error) {
 		}
 		blocks := f.Body().Blocks()
 		for _, block := range blocks {
+			add := true
 			if block.Type() == "variable" || block.Type() == "provider" || block.Type() == "terraform" {
 				if block.Type() == "terraform" {
 					tfBlocks := block.Body().Blocks()
@@ -446,11 +441,28 @@ func createModifiedTerraformConfiguration() ([]byte, error) {
 						// use of the local tfstate file.
 						if tfBlock.Type() == "backend" {
 							block.Body().RemoveBlock(tfBlock)
-							break
+						}
+						// Remove unnecessary required_providers
+						if tfBlock.Type() == "required_providers" {
+							for k, _ := range tfBlock.Body().Attributes() {
+								if k != strings.Split(resource.Name, "_")[0] {
+									tfBlock.Body().RemoveAttribute(k)
+								}
+							}
 						}
 					}
 				}
-				modifiedTfFile.Body().AppendBlock(block)
+				if block.Type() == "provider" {
+					if labels := block.Labels(); len(labels) > 0 {
+						label := labels[0]
+						if label != strings.Split(resource.Name, "_")[0] {
+							add = false
+						}
+					}
+				}
+				if add {
+					modifiedTfFile.Body().AppendBlock(block)
+				}
 			}
 		}
 	}
