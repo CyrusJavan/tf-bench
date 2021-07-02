@@ -473,7 +473,6 @@ func createModifiedTerraformConfiguration(resource *Resource, varFile string) ([
 			}
 		}
 	}
-	fmt.Println(string(modifiedTfFile.Bytes()))
 	return modifiedTfFile.Bytes(), nil
 }
 
