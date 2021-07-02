@@ -1,8 +1,10 @@
 package bench
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"os"
 	"os/exec"
@@ -20,6 +22,7 @@ import (
 	"github.com/itchyny/gojq"
 	"github.com/jedib0t/go-pretty/v6/table"
 	log "github.com/sirupsen/logrus"
+	"github.com/zclconf/go-cty/cty"
 )
 
 const (
@@ -191,7 +194,7 @@ func resourceBenchmark(cfg *Config, resource *Resource, state []byte) (*Resource
 	// Copy over any tfvars or tfvars.json files
 	_, _ = runCommand("/bin/sh", "-c", fmt.Sprintf("cp -R *.tfvars *.tfvars.json %s", dir))
 	// Generate the modified TF file
-	modifiedTf, err := createModifiedTerraformConfiguration(resource)
+	modifiedTf, err := createModifiedTerraformConfiguration(resource, cfg.VarFile)
 	if err != nil {
 		return nil, fmt.Errorf("creating modified tf file: %w", err)
 	}
@@ -411,7 +414,7 @@ func terraformState() (*TerraformState, []byte, error) {
 	return &tfstate, state, nil
 }
 
-func createModifiedTerraformConfiguration(resource *Resource) ([]byte, error) {
+func createModifiedTerraformConfiguration(resource *Resource, varFile string) ([]byte, error) {
 	// We want to build a tf file that contains just these block types:
 	// variable
 	// provider
@@ -432,7 +435,6 @@ func createModifiedTerraformConfiguration(resource *Resource) ([]byte, error) {
 		}
 		blocks := f.Body().Blocks()
 		for _, block := range blocks {
-			add := true
 			if block.Type() == "variable" || block.Type() == "provider" || block.Type() == "terraform" {
 				if block.Type() == "terraform" {
 					tfBlocks := block.Body().Blocks()
@@ -456,15 +458,63 @@ func createModifiedTerraformConfiguration(resource *Resource) ([]byte, error) {
 					if labels := block.Labels(); len(labels) > 0 {
 						label := labels[0]
 						if label != strings.Split(resource.Name, "_")[0] {
-							add = false
+							continue
+						}
+						attrs := block.Body().Attributes()
+						for k, v := range attrs {
+							if len(v.Expr().Variables()) == 0 {
+								continue
+							}
+							block.Body().SetAttributeValue(k, evaluate(v, varFile))
 						}
 					}
 				}
-				if add {
-					modifiedTfFile.Body().AppendBlock(block)
-				}
+				modifiedTfFile.Body().AppendBlock(block)
 			}
 		}
 	}
+	fmt.Println(string(modifiedTfFile.Bytes()))
 	return modifiedTfFile.Bytes(), nil
+}
+
+func evaluate(attr *hclwrite.Attribute, varFile string) cty.Value {
+	return eval(attr, varFile, false)
+}
+
+func eval(attr *hclwrite.Attribute, varFile string, sensitive bool) cty.Value {
+	args := []string{
+		"console",
+	}
+	if varFile != "" {
+		args = append(args, fmt.Sprintf("-var-file=%s", varFile))
+	}
+	console := exec.Command("terraform", args...)
+	pipe, _ := console.StdinPipe()
+
+	var b bytes.Buffer
+	console.Stdout = &b
+	err := console.Start()
+	if err != nil {
+		fmt.Println(err)
+	}
+	attrString := string(attr.Expr().BuildTokens(nil).Bytes())
+	if sensitive {
+		attrString = "nonsensitive(" + attrString + ")"
+	}
+	_, err = io.WriteString(pipe, attrString)
+	if err != nil {
+		fmt.Println(err)
+	}
+	pipe.Close()
+	err = console.Wait()
+	if err != nil {
+		fmt.Println(err)
+	}
+	s := b.String()
+	s = strings.TrimSpace(s)
+	s = strings.Trim(s, `"`)
+	if s == "(sensitive)" && !sensitive {
+		return eval(attr, varFile, true)
+	}
+	return cty.StringVal(s)
 }
