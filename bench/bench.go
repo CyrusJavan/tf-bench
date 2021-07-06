@@ -1,8 +1,10 @@
 package bench
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"os"
 	"os/exec"
@@ -20,6 +22,7 @@ import (
 	"github.com/itchyny/gojq"
 	"github.com/jedib0t/go-pretty/v6/table"
 	log "github.com/sirupsen/logrus"
+	"github.com/zclconf/go-cty/cty"
 )
 
 const (
@@ -27,6 +30,8 @@ const (
 	defaultParallelism = 10
 	clearLine          = "\033[2K"
 )
+
+var tf15 = version.Must(version.NewVersion("v0.15"))
 
 type Config struct {
 	SkipControllerVersion bool
@@ -76,10 +81,10 @@ func NewReport(cfg *Config) *Report {
 
 func (r *Report) String() string {
 	t := table.NewWriter()
-	t.SetTitle("Individual Refresh Statistics")
-	t.AppendHeader(table.Row{"Type", "Count", "Refresh Time"})
+	t.SetTitle("Individual Resource Type Refresh Statistics")
+	t.AppendHeader(table.Row{"Resource Type", "Count", fmt.Sprintf("Average Refresh Time of %d Measurements", r.Config.Iterations)})
 	for _, rr := range r.Resources {
-		t.AppendRow(table.Row{rr.Name, rr.Count, rr.TotalTime})
+		t.AppendRow(table.Row{rr.Name, rr.Count, rr.TotalTime.Round(time.Millisecond)})
 	}
 	reportTemplate := `tf-bench Report %s%s
 iterations per measurement: %d%s%s
@@ -102,7 +107,7 @@ Refresh Time for Whole Workspace: %s
 	if r.TerraformVersion != nil {
 		terraformVer = "\nterraform version: v" + r.TerraformVersion.TerraformVersion
 	}
-	report := fmt.Sprintf(reportTemplate, r.Timestamp.Format(time.RFC3339), controllerVer, r.Config.Iterations, terraformVer, providerVersions, r.TotalTime, tbl)
+	report := fmt.Sprintf(reportTemplate, r.Timestamp.Format(time.RFC3339), controllerVer, r.Config.Iterations, terraformVer, providerVersions, r.TotalTime.Round(time.Millisecond), tbl)
 	return report
 }
 
@@ -151,29 +156,25 @@ func Benchmark(cfg *Config) (*Report, error) {
 
 	report := NewReport(cfg)
 	// Run refresh of the entire workspace to get the TotalTime
-	fmt.Print("Starting measurement for whole workspace refresh.")
+	fmt.Print("All resources measurement:  ")
 	t, err := measureRefresh(".", defaultParallelism, cfg.Iterations, cfg.VarFile)
 	if err != nil {
 		return nil, fmt.Errorf("could not measure refresh for workspace: %w", err)
 	}
+	fmt.Println()
 	report.TotalTime = t
-	fmt.Print(clearLine)
-	fmt.Print("\r")
-	fmt.Println("Finished measurement for whole workspace refresh.")
 
 	// Benchmark each resource type individually
 	for r, count := range resourceTypes {
-		fmt.Printf("Starting measurement for individual resource %q refresh.", r)
-		rr, err := resourceBenchmark(cfg, &Resource{Name: r, Count: count}, state)
+		fmt.Printf("%s measurement:  ", r)
+		rr, err := resourceBenchmark(cfg, &Resource{Name: r, Count: count}, state, report.TerraformVersion)
 		if err != nil {
 			fmt.Printf("During the individual resource benchmark for resourceType=%s the following error occured: %v", r, err)
 			continue
 		}
 		rr.Count = count
 		report.Resources = append(report.Resources, rr)
-		fmt.Print(clearLine)
-		fmt.Print("\r")
-		fmt.Printf("Finished measurement for individual resource %q refresh.\n", r)
+		fmt.Println("average: " + rr.TotalTime.Round(time.Millisecond).String())
 	}
 
 	// Reverse sort the reports by TotalTime
@@ -185,13 +186,28 @@ func Benchmark(cfg *Config) (*Report, error) {
 	return report, nil
 }
 
-func resourceBenchmark(cfg *Config, resource *Resource, state []byte) (*ResourceReport, error) {
+func printSpinner(done *bool) {
+	const c = `|/-\`
+	var i int
+	for {
+		if *done {
+			fmt.Print("\033[1D ")
+			return
+		}
+		fmt.Print("\033[2D ")
+		fmt.Print(string(c[i%4]))
+		i++
+		time.Sleep(120 * time.Millisecond)
+	}
+}
+
+func resourceBenchmark(cfg *Config, resource *Resource, state []byte, tfv *TerraformVersion) (*ResourceReport, error) {
 	dir := os.TempDir()
 	defer os.RemoveAll(dir)
 	// Copy over any tfvars or tfvars.json files
 	_, _ = runCommand("/bin/sh", "-c", fmt.Sprintf("cp -R *.tfvars *.tfvars.json %s", dir))
 	// Generate the modified TF file
-	modifiedTf, err := createModifiedTerraformConfiguration(resource)
+	modifiedTf, err := createModifiedTerraformConfiguration(resource, cfg.VarFile, tfv)
 	if err != nil {
 		return nil, fmt.Errorf("creating modified tf file: %w", err)
 	}
@@ -243,10 +259,11 @@ func resourceBenchmark(cfg *Config, resource *Resource, state []byte) (*Resource
 		return nil, fmt.Errorf("terraform init: %w", err)
 	}
 	// Measure terraform refresh
-	t, err := measureRefresh(dir, resource.Count, cfg.Iterations, cfg.VarFile)
+	t, err := measureRefresh(dir, defaultParallelism, cfg.Iterations, cfg.VarFile)
 	if err != nil {
 		return nil, fmt.Errorf("measuring refresh time: %w", err)
 	}
+
 	return &ResourceReport{
 		Name:      resource.Name,
 		TotalTime: t,
@@ -261,7 +278,13 @@ func measureRefresh(dir string, parallelism, iterations int, varFile string) (ti
 	_, _ = measureRefreshOnce(dir, parallelism, varFile)
 	var total time.Duration
 	for i := 0; i < iterations; i++ {
+		fmt.Printf("iteration %d:  ", i)
+		var done bool
+		go printSpinner(&done)
 		one, err := measureRefreshOnce(dir, parallelism, varFile)
+		done = true
+		time.Sleep(120 * time.Millisecond)
+		fmt.Print(one.Round(time.Millisecond).String() + " ")
 		if err != nil {
 			return 0, err
 		}
@@ -411,7 +434,7 @@ func terraformState() (*TerraformState, []byte, error) {
 	return &tfstate, state, nil
 }
 
-func createModifiedTerraformConfiguration(resource *Resource) ([]byte, error) {
+func createModifiedTerraformConfiguration(resource *Resource, varFile string, tfVersion *TerraformVersion) ([]byte, error) {
 	// We want to build a tf file that contains just these block types:
 	// variable
 	// provider
@@ -432,7 +455,6 @@ func createModifiedTerraformConfiguration(resource *Resource) ([]byte, error) {
 		}
 		blocks := f.Body().Blocks()
 		for _, block := range blocks {
-			add := true
 			if block.Type() == "variable" || block.Type() == "provider" || block.Type() == "terraform" {
 				if block.Type() == "terraform" {
 					tfBlocks := block.Body().Blocks()
@@ -452,19 +474,70 @@ func createModifiedTerraformConfiguration(resource *Resource) ([]byte, error) {
 						}
 					}
 				}
-				if block.Type() == "provider" {
+				tfv, err := version.NewVersion(tfVersion.TerraformVersion)
+				if err != nil {
+					tfv = version.Must(version.NewVersion("v0.12"))
+				}
+				if block.Type() == "provider" && tfv.GreaterThanOrEqual(tf15) {
 					if labels := block.Labels(); len(labels) > 0 {
 						label := labels[0]
 						if label != strings.Split(resource.Name, "_")[0] {
-							add = false
+							continue
+						}
+						attrs := block.Body().Attributes()
+						for k, v := range attrs {
+							if len(v.Expr().Variables()) == 0 {
+								continue
+							}
+							block.Body().SetAttributeValue(k, evaluate(v, varFile))
 						}
 					}
 				}
-				if add {
-					modifiedTfFile.Body().AppendBlock(block)
-				}
+				modifiedTfFile.Body().AppendBlock(block)
 			}
 		}
 	}
 	return modifiedTfFile.Bytes(), nil
+}
+
+func evaluate(attr *hclwrite.Attribute, varFile string) cty.Value {
+	return eval(attr, varFile, false)
+}
+
+func eval(attr *hclwrite.Attribute, varFile string, sensitive bool) cty.Value {
+	args := []string{
+		"console",
+	}
+	if varFile != "" {
+		args = append(args, fmt.Sprintf("-var-file=%s", varFile))
+	}
+	console := exec.Command("terraform", args...)
+	pipe, _ := console.StdinPipe()
+
+	var b bytes.Buffer
+	console.Stdout = &b
+	err := console.Start()
+	if err != nil {
+		fmt.Println(err)
+	}
+	attrString := string(attr.Expr().BuildTokens(nil).Bytes())
+	if sensitive {
+		attrString = "nonsensitive(" + attrString + ")"
+	}
+	_, err = io.WriteString(pipe, attrString)
+	if err != nil {
+		fmt.Println(err)
+	}
+	pipe.Close()
+	err = console.Wait()
+	if err != nil {
+		fmt.Println(err)
+	}
+	s := b.String()
+	s = strings.TrimSpace(s)
+	s = strings.Trim(s, `"`)
+	if s == "(sensitive)" && !sensitive {
+		return eval(attr, varFile, true)
+	}
+	return cty.StringVal(s)
 }

@@ -37,19 +37,19 @@ terraform {
 }
 provider "aviatrix" {
   skip_version_validation = true
-  #  username                = data.aws_ssm_parameter.foo.value
-  username      = var.aviatrix_username
+    username                = data.aws_ssm_parameter.foo.value
+#  username      = var.aviatrix_username
   password      = var.aviatrix_password
   controller_ip = var.aviatrix_ip
 }
-#resource "aws_ssm_parameter" "foo" {
-#  name  = "foo"
-#  type  = "String"
-#  value = var.aviatrix_username
-#}
-#data "aws_ssm_parameter" "foo" {
-#  name = "foo"
-#}
+resource "aws_ssm_parameter" "foo" {
+  name  = "foo"
+  type  = "String"
+  value = var.aviatrix_username
+}
+data "aws_ssm_parameter" "foo" {
+  name = aws_ssm_parameter.foo.name
+}
 resource "aviatrix_vpc" "aws_vpc" {
   cloud_type           = 1
   account_name         = "aws-primary-acc"
