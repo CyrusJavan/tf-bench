@@ -79,10 +79,10 @@ func NewReport(cfg *Config) *Report {
 
 func (r *Report) String() string {
 	t := table.NewWriter()
-	t.SetTitle("Individual Refresh Statistics")
-	t.AppendHeader(table.Row{"Type", "Count", "Refresh Time"})
+	t.SetTitle("Individual Resource Type Refresh Statistics")
+	t.AppendHeader(table.Row{"Resource Type", "Count", fmt.Sprintf("Average Refresh Time of %d Measurements", r.Config.Iterations)})
 	for _, rr := range r.Resources {
-		t.AppendRow(table.Row{rr.Name, rr.Count, rr.TotalTime})
+		t.AppendRow(table.Row{rr.Name, rr.Count, rr.TotalTime.Round(time.Millisecond)})
 	}
 	reportTemplate := `tf-bench Report %s%s
 iterations per measurement: %d%s%s
@@ -105,7 +105,7 @@ Refresh Time for Whole Workspace: %s
 	if r.TerraformVersion != nil {
 		terraformVer = "\nterraform version: v" + r.TerraformVersion.TerraformVersion
 	}
-	report := fmt.Sprintf(reportTemplate, r.Timestamp.Format(time.RFC3339), controllerVer, r.Config.Iterations, terraformVer, providerVersions, r.TotalTime, tbl)
+	report := fmt.Sprintf(reportTemplate, r.Timestamp.Format(time.RFC3339), controllerVer, r.Config.Iterations, terraformVer, providerVersions, r.TotalTime.Round(time.Millisecond), tbl)
 	return report
 }
 
@@ -154,19 +154,21 @@ func Benchmark(cfg *Config) (*Report, error) {
 
 	report := NewReport(cfg)
 	// Run refresh of the entire workspace to get the TotalTime
-	fmt.Print("Starting measurement for whole workspace refresh.")
+	fmt.Print("All resources measurement:  ")
+	var done bool
+	go printSpinner(&done)
 	t, err := measureRefresh(".", defaultParallelism, cfg.Iterations, cfg.VarFile)
+	done = true
+	time.Sleep(120 * time.Millisecond)
 	if err != nil {
 		return nil, fmt.Errorf("could not measure refresh for workspace: %w", err)
 	}
 	report.TotalTime = t
-	fmt.Print(clearLine)
-	fmt.Print("\r")
-	fmt.Println("Finished measurement for whole workspace refresh.")
 
 	// Benchmark each resource type individually
+
 	for r, count := range resourceTypes {
-		fmt.Printf("Starting measurement for individual resource %q refresh.", r)
+		fmt.Printf("%s measurement:  ", r)
 		rr, err := resourceBenchmark(cfg, &Resource{Name: r, Count: count}, state)
 		if err != nil {
 			fmt.Printf("During the individual resource benchmark for resourceType=%s the following error occured: %v", r, err)
@@ -174,9 +176,7 @@ func Benchmark(cfg *Config) (*Report, error) {
 		}
 		rr.Count = count
 		report.Resources = append(report.Resources, rr)
-		fmt.Print(clearLine)
-		fmt.Print("\r")
-		fmt.Printf("Finished measurement for individual resource %q refresh.\n", r)
+		fmt.Println("average: " + rr.TotalTime.Round(time.Millisecond).String())
 	}
 
 	// Reverse sort the reports by TotalTime
@@ -186,6 +186,21 @@ func Benchmark(cfg *Config) (*Report, error) {
 
 	fmt.Println("Finished benchmark.")
 	return report, nil
+}
+
+func printSpinner(done *bool) {
+	const c = `|/-\`
+	var i int
+	for {
+		if *done {
+			fmt.Print("\033[1D ")
+			return
+		}
+		fmt.Print("\033[2D ")
+		fmt.Print(string(c[i%4]))
+		i++
+		time.Sleep(120 * time.Millisecond)
+	}
 }
 
 func resourceBenchmark(cfg *Config, resource *Resource, state []byte) (*ResourceReport, error) {
@@ -246,10 +261,11 @@ func resourceBenchmark(cfg *Config, resource *Resource, state []byte) (*Resource
 		return nil, fmt.Errorf("terraform init: %w", err)
 	}
 	// Measure terraform refresh
-	t, err := measureRefresh(dir, resource.Count, cfg.Iterations, cfg.VarFile)
+	t, err := measureRefresh(dir, defaultParallelism, cfg.Iterations, cfg.VarFile)
 	if err != nil {
 		return nil, fmt.Errorf("measuring refresh time: %w", err)
 	}
+
 	return &ResourceReport{
 		Name:      resource.Name,
 		TotalTime: t,
@@ -264,7 +280,13 @@ func measureRefresh(dir string, parallelism, iterations int, varFile string) (ti
 	_, _ = measureRefreshOnce(dir, parallelism, varFile)
 	var total time.Duration
 	for i := 0; i < iterations; i++ {
+		fmt.Printf("iteration %d:  ", i)
+		var done bool
+		go printSpinner(&done)
 		one, err := measureRefreshOnce(dir, parallelism, varFile)
+		done = true
+		time.Sleep(120 * time.Millisecond)
+		fmt.Print(one.Round(time.Millisecond).String() + " ")
 		if err != nil {
 			return 0, err
 		}
