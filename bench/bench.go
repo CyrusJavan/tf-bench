@@ -21,6 +21,7 @@ import (
 	"github.com/hashicorp/hcl/v2/hclwrite"
 	"github.com/itchyny/gojq"
 	"github.com/jedib0t/go-pretty/v6/table"
+	"github.com/jedib0t/go-pretty/v6/text"
 	log "github.com/sirupsen/logrus"
 	"github.com/zclconf/go-cty/cty"
 )
@@ -37,6 +38,7 @@ type Config struct {
 	SkipControllerVersion bool
 	Iterations            int
 	VarFile               string
+	EventLog              bool
 }
 
 type ResourceReport struct {
@@ -79,13 +81,30 @@ func NewReport(cfg *Config) *Report {
 	return &report
 }
 
+func max(i, j int) int {
+	if i > j {
+		return i
+	}
+	return j
+}
+
 func (r *Report) String() string {
 	t := table.NewWriter()
 	t.SetTitle("Individual Resource Type Refresh Statistics")
-	t.AppendHeader(table.Row{"Resource Type", "Count", fmt.Sprintf("Average Refresh Time of %d Measurements", r.Config.Iterations)})
-	for _, rr := range r.Resources {
-		t.AppendRow(table.Row{rr.Name, rr.Count, rr.TotalTime.Round(time.Millisecond)})
+	if r.Config.EventLog {
+		t.Style().Format.Header = text.FormatDefault
+		t.AppendHeader(table.Row{"Resource Type", "Count", "Average Time Per Resource", "Average*Count"})
+		for _, rr := range r.Resources {
+			calc := int64(rr.TotalTime) * int64(rr.Count)
+			t.AppendRow(table.Row{rr.Name, rr.Count, rr.TotalTime.Round(time.Millisecond), time.Duration(calc).Round(time.Millisecond)})
+		}
+	} else {
+		t.AppendHeader(table.Row{"Resource Type", "Count", fmt.Sprintf("Average Refresh Time of %d Measurements", r.Config.Iterations)})
+		for _, rr := range r.Resources {
+			t.AppendRow(table.Row{rr.Name, rr.Count, rr.TotalTime.Round(time.Millisecond)})
+		}
 	}
+
 	reportTemplate := `tf-bench Report %s%s
 iterations per measurement: %d%s%s
 Refresh Time for Whole Workspace: %s
@@ -136,7 +155,111 @@ Set --skip-controller-version flag to skip including controller version in the r
 	return nil
 }
 
+func eventLogBenchmark(cfg *Config) (*Report, error) {
+	report := NewReport(cfg)
+	if report.TerraformVersion != nil {
+		v0_15_4, err1 := version.NewVersion("v0.15.4")
+		v, err2 := version.NewVersion(report.TerraformVersion.TerraformVersion)
+		if err1 == nil && err2 == nil && v.LessThan(v0_15_4) {
+			return nil, fmt.Errorf(`terraform version is too low to use event log measurement method. 
+Your terraform version is %s, event log measurement method requires at least v0.15.4.
+Set --event-log=false flag to use the temporary directory measurement method.`, report.TerraformVersion.TerraformVersion)
+		}
+	}
+	// Get the JSON event log output of a refresh
+	args := []string{
+		"plan",
+		"-refresh-only",
+		"-json",
+	}
+	if cfg.VarFile != "" {
+		args = append(args, "-var-file="+cfg.VarFile)
+	}
+	var wholeWorkspaceTotal time.Duration
+	reports := map[string]*ResourceReport{}
+	for i := 0; i < cfg.Iterations; i++ {
+		begin := time.Now()
+		out, err := runCommand("terraform", args...)
+		finish := time.Now()
+		wholeWorkspaceTotal += finish.Sub(begin)
+		if err != nil {
+			return nil, fmt.Errorf("running terraform plan -refresh-only -json: %w", err)
+		}
+		type tfEvent struct {
+			Type      string
+			Timestamp time.Time `json:"@timestamp"`
+			Hook      struct {
+				Resource struct {
+					Addr         string
+					ResourceType string `json:"resource_type"`
+				}
+			}
+		}
+		starts := map[string]tfEvent{}
+		ends := map[string]tfEvent{}
+		dec := json.NewDecoder(bytes.NewReader(out))
+		for {
+			var event tfEvent
+			err := dec.Decode(&event)
+			if err == io.EOF {
+				// all done
+				break
+			}
+			if err != nil {
+				return nil, fmt.Errorf("decode json obj: %w", err)
+			}
+			if event.Type == "refresh_start" {
+				starts[event.Hook.Resource.Addr] = event
+			} else if event.Type == "refresh_complete" {
+				ends[event.Hook.Resource.Addr] = event
+			}
+		}
+		m := map[string][]time.Duration{}
+		for k, start := range starts {
+			end := ends[k]
+			d := end.Timestamp.Sub(start.Timestamp)
+			m[start.Hook.Resource.ResourceType] = append(m[start.Hook.Resource.ResourceType], d)
+		}
+		a := map[string]time.Duration{}
+		for k, v := range m {
+			var total int64
+			for _, d := range v {
+				total += int64(d)
+			}
+			avg := time.Duration(total / int64(len(v)))
+			a[k] = avg
+
+			rr := &ResourceReport{
+				Name:      k,
+				Count:     len(v),
+				TotalTime: avg,
+			}
+			if _, ok := reports[k]; ok {
+				reports[k].TotalTime += avg
+			} else {
+				reports[k] = rr
+			}
+		}
+	}
+	for _, r := range reports {
+		r.TotalTime = time.Duration(int64(r.TotalTime) / int64(cfg.Iterations))
+		report.Resources = append(report.Resources, r)
+	}
+	report.TotalTime = time.Duration(int64(wholeWorkspaceTotal) / int64(cfg.Iterations))
+
+	// Reverse sort the reports by TotalTime * Count
+	sort.Slice(report.Resources, func(i, j int) bool {
+		return (int64(report.Resources[i].TotalTime) * int64(report.Resources[i].Count)) > (int64(report.Resources[j].TotalTime) * int64(report.Resources[j].Count))
+	})
+
+	return report, nil
+}
+
 func Benchmark(cfg *Config) (*Report, error) {
+	if cfg.EventLog {
+		return eventLogBenchmark(cfg)
+	}
+
 	tfstate, state, err := terraformState()
 	if err != nil {
 		return nil, err

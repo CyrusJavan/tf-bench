@@ -13,10 +13,12 @@ var (
 	SkipControllerVersion bool
 	Iterations            int
 	VarFile               string
+	EventLog              bool
 )
 
 func init() {
 	rootCmd.Flags().BoolVar(&SkipControllerVersion, "skip-controller-version", false, "Skip adding controller version to generated report")
+	rootCmd.Flags().BoolVar(&EventLog, "event-log", true, "Use event log method of measuring refresh")
 	rootCmd.Flags().IntVar(&Iterations, "iterations", 3, "How many times to run each refresh test. Higher number will be more accurate but slower")
 	rootCmd.Flags().StringVar(&VarFile, "var-file", "", "var-file to pass to terraform commands")
 }
@@ -36,6 +38,7 @@ performance of the current terraform workspace.
 			SkipControllerVersion: SkipControllerVersion,
 			Iterations:            Iterations,
 			VarFile:               VarFile,
+			EventLog:              EventLog,
 		}
 		fmt.Printf("Starting benchmark with configuration=%+v\n", cfg)
 		report, err := bench.Benchmark(cfg)
