@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/AviatrixSystems/terraform-provider-aviatrix/v2/goaviatrix"
+	"github.com/CyrusJavan/tf-bench/internal/util"
 	"github.com/hashicorp/go-version"
 	"github.com/hashicorp/hcl/v2"
 	"github.com/hashicorp/hcl/v2/hclwrite"
@@ -29,7 +30,6 @@ import (
 const (
 	stateFileName      = "terraform.tfstate"
 	defaultParallelism = 10
-	clearLine          = "\033[2K"
 )
 
 var tf15 = version.Must(version.NewVersion("v0.15"))
@@ -41,10 +41,22 @@ type Config struct {
 	EventLog              bool
 }
 
+type Resource struct {
+	Name  string
+	Count int
+}
+
 type ResourceReport struct {
 	Name      string        // Name of the resource
 	Count     int           // Count is the number of these resources in the workspace
 	TotalTime time.Duration // TotalTime is the time for refreshing just these resources
+}
+
+type TerraformState struct {
+	Resources []struct {
+		Type      string
+		Instances []struct{}
+	}
 }
 
 type Report struct {
@@ -54,38 +66,6 @@ type Report struct {
 	ControllerVersion *goaviatrix.AviatrixVersion // ControllerVersion of the Aviatrix controller
 	Resources         []*ResourceReport           // Resources is the slice of individual resource measurements
 	Config            *Config                     // Config that this report was generated with
-}
-
-type Resource struct {
-	Name  string
-	Count int
-}
-
-func NewReport(cfg *Config) *Report {
-	tv, err := terraformVersion()
-	if err != nil {
-		fmt.Printf("WARN: Could not find terraform version: %v\n", err)
-	}
-	report := Report{
-		Timestamp:        time.Now(),
-		TerraformVersion: tv,
-		Config:           cfg,
-	}
-	if !cfg.SkipControllerVersion {
-		av, err := controllerVersion()
-		if err != nil {
-			fmt.Printf("WARN: Could not find controller version: %v\n", err)
-		}
-		report.ControllerVersion = av
-	}
-	return &report
-}
-
-func max(i, j int) int {
-	if i > j {
-		return i
-	}
-	return j
 }
 
 func (r *Report) String() string {
@@ -130,29 +110,81 @@ Refresh Time for Whole Workspace: %s
 	return report
 }
 
-// ValidateEnv checks if we can run a benchmark.
-func ValidateEnv(skipControllerVersion bool) error {
-	// Must be able to execute terraform binary
-	_, err := runCommand("terraform", "-help")
+func NewReport(cfg *Config) *Report {
+	tv, err := terraformVersion()
 	if err != nil {
-		return fmt.Errorf("could not execute `terraform` command")
+		fmt.Printf("WARN: Could not find terraform version: %v\n", err)
 	}
-	// Need Aviatrix environment variables as well if not skipping controller version
-	if !skipControllerVersion {
-		requiredEnvVars := []string{
-			"AVIATRIX_CONTROLLER_IP",
-			"AVIATRIX_USERNAME",
-			"AVIATRIX_PASSWORD",
-		}
-		for _, v := range requiredEnvVars {
-			if s := os.Getenv(v); s == "" {
-				return fmt.Errorf(`environment variable %s is not set. 
-The environment variables %v must be set to include the controller version in the generated report. 
-Set --skip-controller-version flag to skip including controller version in the report.`, v, requiredEnvVars)
-			}
-		}
+	report := Report{
+		Timestamp:        time.Now(),
+		TerraformVersion: tv,
+		Config:           cfg,
 	}
-	return nil
+	if !cfg.SkipControllerVersion {
+		av, err := controllerVersion()
+		if err != nil {
+			fmt.Printf("WARN: Could not find controller version: %v\n", err)
+		}
+		report.ControllerVersion = av
+	}
+	return &report
+}
+
+func Benchmark(cfg *Config) (*Report, error) {
+	if cfg.EventLog {
+		return eventLogBenchmark(cfg)
+	}
+	return tempDirBenchmark(cfg)
+}
+
+func tempDirBenchmark(cfg *Config) (*Report, error) {
+	tfstate, state, err := terraformState()
+	if err != nil {
+		return nil, err
+	}
+
+	// Move the resources types into a map to deduplicate and count.
+	resourceTypes := map[string]int{}
+	for _, r := range tfstate.Resources {
+		resourceTypes[r.Type] += len(r.Instances)
+	}
+
+	var totalCount int
+	for _, v := range resourceTypes {
+		totalCount += v
+	}
+	fmt.Printf("Found %d resources/data_sources in the state file.\n", totalCount)
+
+	report := NewReport(cfg)
+	// Run refresh of the entire workspace to get the TotalTime
+	fmt.Print("All resources measurement:  ")
+	t, err := measureRefresh(".", defaultParallelism, cfg.Iterations, cfg.VarFile)
+	if err != nil {
+		return nil, fmt.Errorf("could not measure refresh for workspace: %w", err)
+	}
+	fmt.Println()
+	report.TotalTime = t
+
+	// Benchmark each resource type individually
+	for r, count := range resourceTypes {
+		fmt.Printf("%s measurement:  ", r)
+		rr, err := resourceBenchmark(cfg, &Resource{Name: r, Count: count}, state, report.TerraformVersion)
+		if err != nil {
+			fmt.Printf("During the individual resource benchmark for resourceType=%s the following error occured: %v", r, err)
+			continue
+		}
+		rr.Count = count
+		report.Resources = append(report.Resources, rr)
+		fmt.Println("average: " + rr.TotalTime.Round(time.Millisecond).String())
+	}
+
+	// Reverse sort the reports by TotalTime
+	sort.Slice(report.Resources, func(i, j int) bool {
+		return report.Resources[i].TotalTime > report.Resources[j].TotalTime
+	})
+
+	fmt.Println("Finished benchmark.")
+	return report, nil
 }
 
 func eventLogBenchmark(cfg *Config) (*Report, error) {
@@ -179,7 +211,7 @@ Set --event-log=false flag to use the temporary directory measurement method.`, 
 	reports := map[string]*ResourceReport{}
 	for i := 0; i < cfg.Iterations; i++ {
 		begin := time.Now()
-		out, err := runCommand("terraform", args...)
+		out, err := util.RunCommand("terraform", args...)
 		finish := time.Now()
 		wholeWorkspaceTotal += finish.Sub(begin)
 		if err != nil {
@@ -255,80 +287,11 @@ Set --event-log=false flag to use the temporary directory measurement method.`, 
 	return report, nil
 }
 
-func Benchmark(cfg *Config) (*Report, error) {
-	if cfg.EventLog {
-		return eventLogBenchmark(cfg)
-	}
-
-	tfstate, state, err := terraformState()
-	if err != nil {
-		return nil, err
-	}
-
-	// Move the resources types into a map to deduplicate and count.
-	resourceTypes := map[string]int{}
-	for _, r := range tfstate.Resources {
-		resourceTypes[r.Type] += len(r.Instances)
-	}
-
-	var totalCount int
-	for _, v := range resourceTypes {
-		totalCount += v
-	}
-	fmt.Printf("Found %d resources/data_sources in the state file.\n", totalCount)
-
-	report := NewReport(cfg)
-	// Run refresh of the entire workspace to get the TotalTime
-	fmt.Print("All resources measurement:  ")
-	t, err := measureRefresh(".", defaultParallelism, cfg.Iterations, cfg.VarFile)
-	if err != nil {
-		return nil, fmt.Errorf("could not measure refresh for workspace: %w", err)
-	}
-	fmt.Println()
-	report.TotalTime = t
-
-	// Benchmark each resource type individually
-	for r, count := range resourceTypes {
-		fmt.Printf("%s measurement:  ", r)
-		rr, err := resourceBenchmark(cfg, &Resource{Name: r, Count: count}, state, report.TerraformVersion)
-		if err != nil {
-			fmt.Printf("During the individual resource benchmark for resourceType=%s the following error occured: %v", r, err)
-			continue
-		}
-		rr.Count = count
-		report.Resources = append(report.Resources, rr)
-		fmt.Println("average: " + rr.TotalTime.Round(time.Millisecond).String())
-	}
-
-	// Reverse sort the reports by TotalTime
-	sort.Slice(report.Resources, func(i, j int) bool {
-		return report.Resources[i].TotalTime > report.Resources[j].TotalTime
-	})
-
-	fmt.Println("Finished benchmark.")
-	return report, nil
-}
-
-func printSpinner(done *bool) {
-	const c = `|/-\`
-	var i int
-	for {
-		if *done {
-			fmt.Print("\033[1D ")
-			return
-		}
-		fmt.Print("\033[2D ")
-		fmt.Print(string(c[i%4]))
-		i++
-		time.Sleep(120 * time.Millisecond)
-	}
-}
-
 func resourceBenchmark(cfg *Config, resource *Resource, state []byte, tfv *TerraformVersion) (*ResourceReport, error) {
 	dir := os.TempDir()
 	defer os.RemoveAll(dir)
 	// Copy over any tfvars or tfvars.json files
-	_, _ = runCommand("/bin/sh", "-c", fmt.Sprintf("cp -R *.tfvars *.tfvars.json %s", dir))
+	_, _ = util.RunCommand("/bin/sh", "-c", fmt.Sprintf("cp -R *.tfvars *.tfvars.json %s", dir))
 	// Generate the modified TF file
 	modifiedTf, err := createModifiedTerraformConfiguration(resource, cfg.VarFile, tfv)
 	if err != nil {
@@ -377,7 +340,7 @@ func resourceBenchmark(cfg *Config, resource *Resource, state []byte, tfv *Terra
 		return nil, fmt.Errorf("writing modified state: %w", err)
 	}
 	// Terraform init
-	_, err = runCommand("terraform", "init")
+	_, err = util.RunCommand("terraform", "init")
 	if err != nil {
 		return nil, fmt.Errorf("terraform init: %w", err)
 	}
@@ -403,7 +366,7 @@ func measureRefresh(dir string, parallelism, iterations int, varFile string) (ti
 	for i := 0; i < iterations; i++ {
 		fmt.Printf("iteration %d:  ", i)
 		var done bool
-		go printSpinner(&done)
+		go util.PrintSpinner(&done)
 		one, err := measureRefreshOnce(dir, parallelism, varFile)
 		done = true
 		time.Sleep(120 * time.Millisecond)
@@ -434,7 +397,7 @@ func measureRefreshOnce(dir string, parallelism int, varFile string) (time.Durat
 		args = append(args, fmt.Sprintf("-var-file=%s", varFile))
 	}
 	start := time.Now()
-	_, err = runCommand("terraform", args...)
+	_, err = util.RunCommand("terraform", args...)
 	end := time.Now()
 	if err != nil {
 		return 0, fmt.Errorf("could not run terraform refresh: %w", err)
@@ -455,7 +418,7 @@ var (
 )
 
 func terraformVersion() (*TerraformVersion, error) {
-	out, err := runCommand("terraform", "version", "-json")
+	out, err := util.RunCommand("terraform", "version", "-json")
 	if err != nil {
 		return nil, fmt.Errorf("running terraform version -json command: %w", err)
 	}
@@ -528,24 +491,8 @@ func controllerVersion() (*goaviatrix.AviatrixVersion, error) {
 	return version, nil
 }
 
-func runCommand(name string, arg ...string) ([]byte, error) {
-	c := exec.Command(name, arg...)
-	out, err := c.CombinedOutput()
-	if err != nil {
-		return nil, fmt.Errorf("running command: %w output: %s", err, string(out))
-	}
-	return out, nil
-}
-
-type TerraformState struct {
-	Resources []struct {
-		Type      string
-		Instances []struct{}
-	}
-}
-
 func terraformState() (*TerraformState, []byte, error) {
-	state, err := runCommand("terraform", "state", "pull")
+	state, err := util.RunCommand("terraform", "state", "pull")
 	if err != nil {
 		return nil, nil, fmt.Errorf("could not read state file: %w", err)
 	}

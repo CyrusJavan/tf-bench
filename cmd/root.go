@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/CyrusJavan/tf-bench/bench"
+	"github.com/CyrusJavan/tf-bench/internal/util"
 	"github.com/spf13/cobra"
 )
 
@@ -31,7 +32,7 @@ tf-bench creates a report that details the Terraform refresh
 performance of the current terraform workspace. 
 `,
 	PreRunE: func(cmd *cobra.Command, args []string) error {
-		return bench.ValidateEnv(SkipControllerVersion)
+		return validateEnv(SkipControllerVersion)
 	},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		cfg := &bench.Config{
@@ -56,6 +57,31 @@ performance of the current terraform workspace.
 		fmt.Printf("Wrote report to file %s\n", filename)
 		return nil
 	},
+}
+
+// validateEnv checks if we can run a benchmark.
+func validateEnv(skipControllerVersion bool) error {
+	// Must be able to execute terraform binary
+	_, err := util.RunCommand("terraform", "-help")
+	if err != nil {
+		return fmt.Errorf("could not execute `terraform` command")
+	}
+	// Need Aviatrix environment variables as well if not skipping controller version
+	if !skipControllerVersion {
+		requiredEnvVars := []string{
+			"AVIATRIX_CONTROLLER_IP",
+			"AVIATRIX_USERNAME",
+			"AVIATRIX_PASSWORD",
+		}
+		for _, v := range requiredEnvVars {
+			if s := os.Getenv(v); s == "" {
+				return fmt.Errorf(`environment variable %s is not set. 
+The environment variables %v must be set to include the controller version in the generated report. 
+Set --skip-controller-version flag to skip including controller version in the report.`, v, requiredEnvVars)
+			}
+		}
+	}
+	return nil
 }
 
 func Execute() {
