@@ -34,6 +34,16 @@ const (
 
 var tf15 = version.Must(version.NewVersion("v0.15"))
 
+type TerraformRunner struct {
+	execPath string
+}
+
+func (tr *TerraformRunner) Run(arg ...string) ([]byte, error) {
+	return util.RunCommand(tr.execPath, arg...)
+}
+
+var SystemTerraform = &TerraformRunner{execPath: "terraform"}
+
 type Config struct {
 	SkipControllerVersion bool
 	Iterations            int
@@ -110,8 +120,8 @@ Refresh Time for Whole Workspace: %s
 	return report
 }
 
-func NewReport(cfg *Config) *Report {
-	tv, err := terraformVersion()
+func newReport(cfg *Config, tfRunner *TerraformRunner) *Report {
+	tv, err := terraformVersion(tfRunner)
 	if err != nil {
 		fmt.Printf("WARN: Could not find terraform version: %v\n", err)
 	}
@@ -130,15 +140,15 @@ func NewReport(cfg *Config) *Report {
 	return &report
 }
 
-func Benchmark(cfg *Config) (*Report, error) {
+func Benchmark(cfg *Config, tfRunner *TerraformRunner) (*Report, error) {
 	if cfg.EventLog {
-		return eventLogBenchmark(cfg)
+		return eventLogBenchmark(cfg, tfRunner)
 	}
-	return tempDirBenchmark(cfg)
+	return tempDirBenchmark(cfg, tfRunner)
 }
 
-func tempDirBenchmark(cfg *Config) (*Report, error) {
-	tfstate, state, err := terraformState()
+func tempDirBenchmark(cfg *Config, tfRunner *TerraformRunner) (*Report, error) {
+	tfstate, state, err := terraformState(tfRunner)
 	if err != nil {
 		return nil, err
 	}
@@ -155,10 +165,10 @@ func tempDirBenchmark(cfg *Config) (*Report, error) {
 	}
 	fmt.Printf("Found %d resources/data_sources in the state file.\n", totalCount)
 
-	report := NewReport(cfg)
+	report := newReport(cfg, tfRunner)
 	// Run refresh of the entire workspace to get the TotalTime
 	fmt.Print("All resources measurement:  ")
-	t, err := measureRefresh(".", defaultParallelism, cfg.Iterations, cfg.VarFile)
+	t, err := measureRefresh(".", defaultParallelism, cfg.Iterations, cfg.VarFile, tfRunner)
 	if err != nil {
 		return nil, fmt.Errorf("could not measure refresh for workspace: %w", err)
 	}
@@ -168,7 +178,7 @@ func tempDirBenchmark(cfg *Config) (*Report, error) {
 	// Benchmark each resource type individually
 	for r, count := range resourceTypes {
 		fmt.Printf("%s measurement:  ", r)
-		rr, err := resourceBenchmark(cfg, &Resource{Name: r, Count: count}, state, report.TerraformVersion)
+		rr, err := resourceBenchmark(cfg, &Resource{Name: r, Count: count}, state, report.TerraformVersion, tfRunner)
 		if err != nil {
 			fmt.Printf("During the individual resource benchmark for resourceType=%s the following error occured: %v", r, err)
 			continue
@@ -187,8 +197,8 @@ func tempDirBenchmark(cfg *Config) (*Report, error) {
 	return report, nil
 }
 
-func eventLogBenchmark(cfg *Config) (*Report, error) {
-	report := NewReport(cfg)
+func eventLogBenchmark(cfg *Config, tfRunner *TerraformRunner) (*Report, error) {
+	report := newReport(cfg, tfRunner)
 	if report.TerraformVersion != nil {
 		v0_15_4, err1 := version.NewVersion("v0.15.4")
 		v, err2 := version.NewVersion(report.TerraformVersion.TerraformVersion)
@@ -211,7 +221,7 @@ Set --event-log=false flag to use the temporary directory measurement method.`, 
 	reports := map[string]*ResourceReport{}
 	for i := 0; i < cfg.Iterations; i++ {
 		begin := time.Now()
-		out, err := util.RunCommand("terraform", args...)
+		out, err := tfRunner.Run(args...)
 		finish := time.Now()
 		wholeWorkspaceTotal += finish.Sub(begin)
 		if err != nil {
@@ -287,7 +297,7 @@ Set --event-log=false flag to use the temporary directory measurement method.`, 
 	return report, nil
 }
 
-func resourceBenchmark(cfg *Config, resource *Resource, state []byte, tfv *TerraformVersion) (*ResourceReport, error) {
+func resourceBenchmark(cfg *Config, resource *Resource, state []byte, tfv *TerraformVersion, tfRunner *TerraformRunner) (*ResourceReport, error) {
 	dir := os.TempDir()
 	defer os.RemoveAll(dir)
 	// Copy over any tfvars or tfvars.json files
@@ -340,12 +350,12 @@ func resourceBenchmark(cfg *Config, resource *Resource, state []byte, tfv *Terra
 		return nil, fmt.Errorf("writing modified state: %w", err)
 	}
 	// Terraform init
-	_, err = util.RunCommand("terraform", "init")
+	_, err = tfRunner.Run("init")
 	if err != nil {
 		return nil, fmt.Errorf("terraform init: %w", err)
 	}
 	// Measure terraform refresh
-	t, err := measureRefresh(dir, defaultParallelism, cfg.Iterations, cfg.VarFile)
+	t, err := measureRefresh(dir, defaultParallelism, cfg.Iterations, cfg.VarFile, tfRunner)
 	if err != nil {
 		return nil, fmt.Errorf("measuring refresh time: %w", err)
 	}
@@ -356,18 +366,18 @@ func resourceBenchmark(cfg *Config, resource *Resource, state []byte, tfv *Terra
 	}, nil
 }
 
-func measureRefresh(dir string, parallelism, iterations int, varFile string) (time.Duration, error) {
+func measureRefresh(dir string, parallelism, iterations int, varFile string, tfRunner *TerraformRunner) (time.Duration, error) {
 	// I've noticed some inflated results and it seems that
 	// Terraform is doing some extra work when running an initial
 	// Terraform refresh. So, we will throw out the result of the
 	// first Terraform refresh.
-	_, _ = measureRefreshOnce(dir, parallelism, varFile)
+	_, _ = measureRefreshOnce(dir, parallelism, varFile, tfRunner)
 	var total time.Duration
 	for i := 0; i < iterations; i++ {
 		fmt.Printf("iteration %d:  ", i)
 		var done bool
 		go util.PrintSpinner(&done)
-		one, err := measureRefreshOnce(dir, parallelism, varFile)
+		one, err := measureRefreshOnce(dir, parallelism, varFile, tfRunner)
 		done = true
 		time.Sleep(120 * time.Millisecond)
 		fmt.Print(one.Round(time.Millisecond).String() + " ")
@@ -379,7 +389,7 @@ func measureRefresh(dir string, parallelism, iterations int, varFile string) (ti
 	return time.Duration(int64(total) / int64(iterations)), nil
 }
 
-func measureRefreshOnce(dir string, parallelism int, varFile string) (time.Duration, error) {
+func measureRefreshOnce(dir string, parallelism int, varFile string, tfRunner *TerraformRunner) (time.Duration, error) {
 	pwd, err := os.Getwd()
 	if err != nil {
 		return 0, fmt.Errorf("could not get current working dir: %w", err)
@@ -397,7 +407,7 @@ func measureRefreshOnce(dir string, parallelism int, varFile string) (time.Durat
 		args = append(args, fmt.Sprintf("-var-file=%s", varFile))
 	}
 	start := time.Now()
-	_, err = util.RunCommand("terraform", args...)
+	_, err = tfRunner.Run(args...)
 	end := time.Now()
 	if err != nil {
 		return 0, fmt.Errorf("could not run terraform refresh: %w", err)
@@ -417,8 +427,8 @@ var (
 	providerVersionOutputRe = regexp.MustCompile(`(\n\+ provider[\. ](?P<name>\S+) ` + simpleVersionRe + `)`)
 )
 
-func terraformVersion() (*TerraformVersion, error) {
-	out, err := util.RunCommand("terraform", "version", "-json")
+func terraformVersion(tfRunner *TerraformRunner) (*TerraformVersion, error) {
+	out, err := tfRunner.Run("version", "-json")
 	if err != nil {
 		return nil, fmt.Errorf("running terraform version -json command: %w", err)
 	}
@@ -491,8 +501,8 @@ func controllerVersion() (*goaviatrix.AviatrixVersion, error) {
 	return version, nil
 }
 
-func terraformState() (*TerraformState, []byte, error) {
-	state, err := util.RunCommand("terraform", "state", "pull")
+func terraformState(tfRunner *TerraformRunner) (*TerraformState, []byte, error) {
+	state, err := tfRunner.Run("state", "pull")
 	if err != nil {
 		return nil, nil, fmt.Errorf("could not read state file: %w", err)
 	}

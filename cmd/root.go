@@ -42,7 +42,7 @@ performance of the current terraform workspace.
 			EventLog:              EventLog,
 		}
 		fmt.Printf("Starting benchmark with configuration=%+v\n", cfg)
-		report, err := bench.Benchmark(cfg)
+		report, err := bench.Benchmark(cfg, bench.SystemTerraform)
 		if err != nil {
 			return err
 		}
