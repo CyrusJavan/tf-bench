@@ -32,7 +32,10 @@ const (
 	defaultParallelism = 10
 )
 
-var tf15 = version.Must(version.NewVersion("v0.15"))
+var (
+	tf15         = version.Must(version.NewVersion("v0.15"))
+	buildVersion = ""
+)
 
 type TerraformRunner struct {
 	execPath string
@@ -95,7 +98,7 @@ func (r *Report) String() string {
 		}
 	}
 
-	reportTemplate := `tf-bench Report %s%s
+	reportTemplate := `tf-bench (%s) Report %s%s
 iterations per measurement: %d%s%s
 Refresh Time for Whole Workspace: %s
 %s
@@ -116,7 +119,10 @@ Refresh Time for Whole Workspace: %s
 	if r.TerraformVersion != nil {
 		terraformVer = "\nterraform version: v" + r.TerraformVersion.TerraformVersion
 	}
-	report := fmt.Sprintf(reportTemplate, r.Timestamp.Format(time.RFC3339), controllerVer, r.Config.Iterations, terraformVer, providerVersions, r.TotalTime.Round(time.Millisecond), tbl)
+	if buildVersion == "" {
+		buildVersion = time.Now().Format(time.RFC3339)
+	}
+	report := fmt.Sprintf(reportTemplate, buildVersion, r.Timestamp.Format(time.RFC3339), controllerVer, r.Config.Iterations, terraformVer, providerVersions, r.TotalTime.Round(time.Millisecond), tbl)
 	return report
 }
 
