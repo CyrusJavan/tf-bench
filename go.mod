@@ -12,4 +12,5 @@ require (
 	github.com/spf13/cobra v1.1.3
 	github.com/stretchr/testify v1.6.1
 	github.com/zclconf/go-cty v1.7.1
+	gonum.org/v1/gonum v0.9.3
 )

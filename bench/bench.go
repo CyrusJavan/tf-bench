@@ -11,7 +11,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
@@ -25,6 +24,7 @@ import (
 	"github.com/jedib0t/go-pretty/v6/text"
 	log "github.com/sirupsen/logrus"
 	"github.com/zclconf/go-cty/cty"
+	"gonum.org/v1/gonum/stat"
 )
 
 const (
@@ -63,6 +63,11 @@ type ResourceReport struct {
 	Name      string        // Name of the resource
 	Count     int           // Count is the number of these resources in the workspace
 	TotalTime time.Duration // TotalTime is the time for refreshing just these resources
+	Max       time.Duration
+	Min       time.Duration
+	StdDev    time.Duration
+	MaxID     string // MaxID is the ID of the resources with Max refresh time.
+	MinID     string // MinID is the ID of the resource with Min refresh time.
 }
 
 type TerraformState struct {
@@ -83,13 +88,19 @@ type Report struct {
 
 func (r *Report) String() string {
 	t := table.NewWriter()
-	t.SetTitle("Individual Resource Type Refresh Statistics")
+	t2 := table.NewWriter()
+	t.SetTitle("Resource Type Refresh Statistics")
+	t2.SetTitle("Resource Type Fastest and Slowest")
 	if r.Config.EventLog {
 		t.Style().Format.Header = text.FormatDefault
-		t.AppendHeader(table.Row{"Resource Type", "Count", "Average Time Per Resource", "Average*Count"})
+		t2.Style().Format.Header = text.FormatDefault
+		t.AppendHeader(table.Row{"Resource Type", "Count", "Average Time Per Resource", "Average*Count", "Minimum", "Maximum", "StdDev"})
+		t2.AppendHeader(table.Row{"Resource Type", "Fastest", "Slowest"})
 		for _, rr := range r.Resources {
 			calc := int64(rr.TotalTime) * int64(rr.Count)
-			t.AppendRow(table.Row{rr.Name, rr.Count, rr.TotalTime.Round(time.Millisecond), time.Duration(calc).Round(time.Millisecond)})
+			t.AppendRow(table.Row{rr.Name, rr.Count, rr.TotalTime.Round(time.Millisecond), time.Duration(calc).Round(time.Millisecond),
+				rr.Min.Round(time.Millisecond), rr.Max.Round(time.Millisecond), rr.StdDev.Round(time.Millisecond)})
+			t2.AppendRow(table.Row{rr.Name, rr.MinID, rr.MaxID})
 		}
 	} else {
 		t.AppendHeader(table.Row{"Resource Type", "Count", fmt.Sprintf("Average Refresh Time of %d Measurements", r.Config.Iterations)})
@@ -102,8 +113,8 @@ func (r *Report) String() string {
 iterations per measurement: %d%s%s
 Refresh Time for Whole Workspace: %s
 %s
+%s
 `
-	tbl := t.Render()
 	providerVersions := ""
 	if r.TerraformVersion != nil {
 		providerVersions = "\nprovider versions:\n"
@@ -113,16 +124,19 @@ Refresh Time for Whole Workspace: %s
 	}
 	var controllerVer string
 	if r.ControllerVersion != nil {
-		controllerVer = "\ncontroller version: v" + strconv.Itoa(int(r.ControllerVersion.Major)) + "." + strconv.Itoa(int(r.ControllerVersion.Minor)) + "-" + strconv.Itoa(int(r.ControllerVersion.Build))
+		controllerVer = fmt.Sprintf("\ncontroller version: v%d.%d.%d",
+			r.ControllerVersion.Major, r.ControllerVersion.Minor, r.ControllerVersion.Build)
 	}
 	var terraformVer string
 	if r.TerraformVersion != nil {
 		terraformVer = "\nterraform version: v" + r.TerraformVersion.TerraformVersion
 	}
 	if buildVersion == "" {
-		buildVersion = time.Now().Format(time.RFC3339)
+		buildVersion = "build time: " + time.Now().Format(time.RFC3339)
 	}
-	report := fmt.Sprintf(reportTemplate, buildVersion, r.Timestamp.Format(time.RFC3339), controllerVer, r.Config.Iterations, terraformVer, providerVersions, r.TotalTime.Round(time.Millisecond), tbl)
+	report := fmt.Sprintf(reportTemplate, buildVersion, r.Timestamp.Format(time.RFC3339Nano),
+		controllerVer, r.Config.Iterations, terraformVer, providerVersions,
+		r.TotalTime.Round(time.Millisecond), t.Render(), t2.Render())
 	return report
 }
 
@@ -225,6 +239,7 @@ Set --event-log=false flag to use the temporary directory measurement method.`, 
 	}
 	var wholeWorkspaceTotal time.Duration
 	reports := map[string]*ResourceReport{}
+	resourceOverallData := map[string][]float64{}
 	for i := 0; i < cfg.Iterations; i++ {
 		begin := time.Now()
 		out, err := tfRunner.Run(args...)
@@ -262,35 +277,50 @@ Set --event-log=false flag to use the temporary directory measurement method.`, 
 				ends[event.Hook.Resource.Addr] = event
 			}
 		}
-		m := map[string][]time.Duration{}
+		type ResourceMeasurement struct {
+			d  time.Duration
+			id string
+		}
+		measurements := map[string][]*ResourceMeasurement{}
 		for k, start := range starts {
 			end := ends[k]
 			d := end.Timestamp.Sub(start.Timestamp)
-			m[start.Hook.Resource.ResourceType] = append(m[start.Hook.Resource.ResourceType], d)
+			measurements[start.Hook.Resource.ResourceType] = append(measurements[start.Hook.Resource.ResourceType], &ResourceMeasurement{
+				d:  d,
+				id: start.Hook.Resource.Addr,
+			})
 		}
-		a := map[string]time.Duration{}
-		for k, v := range m {
-			var total int64
-			for _, d := range v {
-				total += int64(d)
-			}
-			avg := time.Duration(total / int64(len(v)))
-			a[k] = avg
-
+		for resourceType, resourceMeasurements := range measurements {
 			rr := &ResourceReport{
-				Name:      k,
-				Count:     len(v),
-				TotalTime: avg,
+				Name:  resourceType,
+				Count: len(resourceMeasurements),
+				Min:   (1 << 63) - 1,
 			}
-			if _, ok := reports[k]; ok {
-				reports[k].TotalTime += avg
+			if _, ok := reports[resourceType]; ok {
+				rr = reports[resourceType]
 			} else {
-				reports[k] = rr
+				reports[resourceType] = rr
 			}
+			var total int64
+			for _, measurement := range resourceMeasurements {
+				resourceOverallData[resourceType] = append(resourceOverallData[resourceType], float64(measurement.d))
+				total += int64(measurement.d)
+				if int64(measurement.d) < int64(rr.Min) {
+					rr.Min = measurement.d
+					rr.MinID = measurement.id
+				}
+				if int64(measurement.d) > int64(rr.Max) {
+					rr.Max = measurement.d
+					rr.MaxID = measurement.id
+				}
+			}
+			avg := time.Duration(total / int64(len(resourceMeasurements)))
+			rr.TotalTime += avg
 		}
 	}
 	for _, r := range reports {
 		r.TotalTime = time.Duration(int64(r.TotalTime) / int64(cfg.Iterations))
+		r.StdDev = time.Duration(stat.PopStdDev(resourceOverallData[r.Name], nil))
 		report.Resources = append(report.Resources, r)
 	}
 	report.TotalTime = time.Duration(int64(wholeWorkspaceTotal) / int64(cfg.Iterations))

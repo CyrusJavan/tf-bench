@@ -27,7 +27,7 @@ resource "aviatrix_vpc" "aws_vpc" {
   cloud_type           = 1
   account_name         = "aws-primary-acc"
   region               = "us-west-1"
-  name                 = "aws-vpc"
+  name                 = "aws-vpc-multiple-provider-test"
   cidr                 = "10.0.0.0/16"
   aviatrix_transit_vpc = false
   aviatrix_firenet_vpc = false
