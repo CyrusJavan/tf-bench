@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"os/exec"
 	"time"
+
+	"github.com/jedib0t/go-pretty/v6/progress"
 )
 
 func RunCommand(name string, arg ...string) ([]byte, error) {
@@ -28,4 +30,20 @@ func PrintSpinner(done *bool) {
 		i++
 		time.Sleep(120 * time.Millisecond)
 	}
+}
+
+func ProgressWriter() progress.Writer {
+	pw := progress.NewWriter()
+	pw.SetAutoStop(true)
+	pw.SetTrackerLength(25)
+	pw.ShowOverallTracker(true)
+	pw.ShowTracker(true)
+	pw.ShowValue(true)
+	pw.SetMessageWidth(24)
+	pw.SetSortBy(progress.SortByPercentDsc)
+	pw.SetStyle(progress.StyleDefault)
+	pw.SetTrackerPosition(progress.PositionRight)
+	pw.SetUpdateFrequency(time.Millisecond * 100)
+	pw.Style().Options.PercentFormat = "%4.1f%%"
+	return pw
 }

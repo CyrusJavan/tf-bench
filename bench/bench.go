@@ -22,8 +22,10 @@ import (
 	"github.com/itchyny/gojq"
 	"github.com/jedib0t/go-pretty/v6/table"
 	"github.com/jedib0t/go-pretty/v6/text"
+	"github.com/schollz/progressbar/v3"
 	log "github.com/sirupsen/logrus"
 	"github.com/zclconf/go-cty/cty"
+	"go.uber.org/zap"
 	"gonum.org/v1/gonum/stat"
 )
 
@@ -43,6 +45,19 @@ type TerraformRunner struct {
 
 func (tr *TerraformRunner) Run(arg ...string) ([]byte, error) {
 	return util.RunCommand(tr.execPath, arg...)
+}
+
+func (tr *TerraformRunner) RunAsync(arg ...string) (io.Reader, func() error, error) {
+	c := exec.Command(tr.execPath, arg...)
+	pipe, err := c.StdoutPipe()
+	if err != nil {
+		return nil, nil, fmt.Errorf("could not get StdoutPipe of command: %w", err)
+	}
+	err = c.Start()
+	if err != nil {
+		return nil, nil, fmt.Errorf("could not start command: %w", err)
+	}
+	return pipe, c.Wait, nil
 }
 
 var SystemTerraform = &TerraformRunner{execPath: "terraform"}
@@ -73,6 +88,7 @@ type ResourceReport struct {
 type TerraformState struct {
 	Resources []struct {
 		Type      string
+		Mode      string
 		Instances []struct{}
 	}
 }
@@ -158,9 +174,16 @@ func newReport(cfg *Config, tfRunner *TerraformRunner) *Report {
 	return &report
 }
 
-func Benchmark(cfg *Config, tfRunner *TerraformRunner) (*Report, error) {
+func Benchmark(cfg *Config, tfRunner *TerraformRunner, logger *zap.Logger) (*Report, error) {
+	if logger == nil {
+		var err error
+		logger, err = zap.NewProduction()
+		if err != nil {
+			return nil, fmt.Errorf("could not initialize logger: %w", err)
+		}
+	}
 	if cfg.EventLog {
-		return eventLogBenchmark(cfg, tfRunner)
+		return eventLogBenchmark(cfg, tfRunner, logger)
 	}
 	return tempDirBenchmark(cfg, tfRunner)
 }
@@ -215,7 +238,24 @@ func tempDirBenchmark(cfg *Config, tfRunner *TerraformRunner) (*Report, error) {
 	return report, nil
 }
 
-func eventLogBenchmark(cfg *Config, tfRunner *TerraformRunner) (*Report, error) {
+func eventLogBenchmark(cfg *Config, tfRunner *TerraformRunner, logger *zap.Logger) (*Report, error) {
+	logger.Debug("Begin eventLogBenchmark")
+	logger.Debug("Getting terraform state")
+	tfstate, _, err := terraformState(tfRunner)
+	if err != nil {
+		return nil, fmt.Errorf("could not get terraform state: %w", err)
+	}
+	resourceTypes := map[string]int{}
+	for _, r := range tfstate.Resources {
+		if r.Mode == "data" {
+			continue
+		}
+		resourceTypes[r.Type] += len(r.Instances)
+	}
+	var totalCount int
+	for _, v := range resourceTypes {
+		totalCount += v
+	}
 	report := newReport(cfg, tfRunner)
 	if report.TerraformVersion != nil {
 		v0_15_4, err1 := version.NewVersion("v0.15.4")
@@ -240,11 +280,10 @@ Set --event-log=false flag to use the temporary directory measurement method.`, 
 	resourceOverallData := map[string][]float64{}
 	for i := 0; i < cfg.Iterations; i++ {
 		begin := time.Now()
-		out, err := tfRunner.Run(args...)
-		finish := time.Now()
-		wholeWorkspaceTotal += finish.Sub(begin)
+		logger.Debug("Begin running terraform plan -refresh-only -json")
+		stdout, waitFunc, err := tfRunner.RunAsync(args...)
 		if err != nil {
-			return nil, fmt.Errorf("running terraform plan -refresh-only -json: %w", err)
+			return nil, fmt.Errorf("starting terraform plan -refresh-only -json: %w", err)
 		}
 		type tfEvent struct {
 			Type      string
@@ -258,7 +297,24 @@ Set --event-log=false flag to use the temporary directory measurement method.`, 
 		}
 		starts := map[string]tfEvent{}
 		ends := map[string]tfEvent{}
-		dec := json.NewDecoder(bytes.NewReader(out))
+		dec := json.NewDecoder(stdout)
+		bar := progressbar.NewOptions64(
+			int64(totalCount),
+			progressbar.OptionSetDescription(fmt.Sprintf("Iteration %d", i+1)),
+			progressbar.OptionSetWriter(os.Stdout),
+			progressbar.OptionSetWidth(10),
+			progressbar.OptionShowCount(),
+			progressbar.OptionOnCompletion(func() {
+				fmt.Fprint(os.Stdout, "\n")
+			}),
+			progressbar.OptionSpinnerType(14),
+			progressbar.OptionFullWidth(),
+			progressbar.OptionSetRenderBlankState(true),
+		)
+		err = bar.RenderBlank()
+		if err != nil {
+			logger.Debug("could not render blank progress bar", zap.Error(err))
+		}
 		for {
 			var event tfEvent
 			err := dec.Decode(&event)
@@ -267,26 +323,48 @@ Set --event-log=false flag to use the temporary directory measurement method.`, 
 				break
 			}
 			if err != nil {
-				return nil, fmt.Errorf("decode json obj: %w", err)
+				buf := new(strings.Builder)
+				_, _ = io.Copy(buf, dec.Buffered())
+				logger.Error("could not decode JSON object from Terraform event log",
+					zap.String("decoder_buffer", buf.String()),
+					zap.Error(err))
+				break
 			}
 			if event.Type == "refresh_start" {
 				starts[event.Hook.Resource.Addr] = event
 			} else if event.Type == "refresh_complete" {
 				ends[event.Hook.Resource.Addr] = event
+				err := bar.Add(1)
+				if err != nil {
+					logger.Debug("could not increment progress bar", zap.Error(err))
+				}
 			}
 		}
+		err = waitFunc()
+		if err != nil {
+			logger.Warn("could not wait for terraform plan -refresh-only -json to finish", zap.Error(err))
+		}
+		finish := time.Now()
+		err = bar.Finish()
+		if err != nil {
+			logger.Debug("could not finish progress bar", zap.Error(err))
+		}
+		logger.Debug("Finished running terraform plan -refresh-only -json")
+
+		wholeWorkspaceTotal += finish.Sub(begin)
 		type ResourceMeasurement struct {
 			d  time.Duration
 			id string
 		}
 		measurements := map[string][]*ResourceMeasurement{}
 		for k, start := range starts {
-			end := ends[k]
-			d := end.Timestamp.Sub(start.Timestamp)
-			measurements[start.Hook.Resource.ResourceType] = append(measurements[start.Hook.Resource.ResourceType], &ResourceMeasurement{
-				d:  d,
-				id: start.Hook.Resource.Addr,
-			})
+			if end, ok := ends[k]; ok {
+				d := end.Timestamp.Sub(start.Timestamp)
+				measurements[start.Hook.Resource.ResourceType] = append(measurements[start.Hook.Resource.ResourceType], &ResourceMeasurement{
+					d:  d,
+					id: start.Hook.Resource.Addr,
+				})
+			}
 		}
 		for resourceType, resourceMeasurements := range measurements {
 			rr := &ResourceReport{

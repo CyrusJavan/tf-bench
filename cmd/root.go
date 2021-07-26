@@ -8,6 +8,7 @@ import (
 	"github.com/CyrusJavan/tf-bench/bench"
 	"github.com/CyrusJavan/tf-bench/internal/util"
 	"github.com/spf13/cobra"
+	"go.uber.org/zap"
 )
 
 var (
@@ -15,11 +16,13 @@ var (
 	Iterations            int
 	VarFile               string
 	EventLog              bool
+	Verbose               bool
 )
 
 func init() {
 	rootCmd.Flags().BoolVar(&SkipControllerVersion, "skip-controller-version", false, "Skip adding controller version to generated report")
 	rootCmd.Flags().BoolVar(&EventLog, "event-log", true, "Use event log method of measuring refresh")
+	rootCmd.Flags().BoolVarP(&Verbose, "verbose", "v", false, "Enable debug logging")
 	rootCmd.Flags().IntVar(&Iterations, "iterations", 3, "How many times to run each refresh test. Higher number will be more accurate but slower")
 	rootCmd.Flags().StringVar(&VarFile, "var-file", "", "var-file to pass to terraform commands")
 }
@@ -42,7 +45,20 @@ performance of the current terraform workspace.
 			EventLog:              EventLog,
 		}
 		fmt.Printf("Starting benchmark with configuration=%+v\n", cfg)
-		report, err := bench.Benchmark(cfg, bench.SystemTerraform)
+		var logger *zap.Logger
+		var err error
+		if Verbose {
+			logger, err = zap.NewDevelopment()
+			if err != nil {
+				return fmt.Errorf("could not initialize verbose logger: %w", err)
+			}
+		} else {
+			logger, err = zap.NewProduction()
+			if err != nil {
+				return fmt.Errorf("could not initialize production logger: %w", err)
+			}
+		}
+		report, err := bench.Benchmark(cfg, bench.SystemTerraform, logger)
 		if err != nil {
 			return err
 		}
