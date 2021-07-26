@@ -3,28 +3,36 @@ Benchmark terraform refresh performance of the resources in your workspace and g
 
 ## Example generated report
 ```
-tf-bench Report 2021-06-30T15:55:21-07:00
-iterations per measurement: 1
-terraform version: v0.12.5
+tf-bench (build time: 2021-07-25T18:05:55-07:00) Report 2021-07-25T18:05:31.57763-07:00
+iterations per measurement: 3
+terraform version: v1.0.0
 provider versions:
-aws=3.37.0
-azurerm=2.56.0
-google=3.65.0
-random=3.1.0
-aviatrix=2.18.2
+registry.terraform.io/hashicorp/azurerm=2.66.0
+registry.terraform.io/hashicorp/random=3.1.0
+registry.terraform.io/aviatrixsystems/aviatrix=2.18.2
+registry.terraform.io/hashicorp/aws=3.15.0
 
-Refresh Time for Whole Workspace: 13.514001184s
-+------------------------------------------------+
-| Individual Refresh Statistics                  |
-+------------------------+-------+---------------+
-| TYPE                   | COUNT |  REFRESH TIME |
-+------------------------+-------+---------------+
-| azurerm_resource_group |     1 | 11.450071408s |
-| aws_s3_bucket          |     1 |  8.310989713s |
-| aviatrix_vpc           |     1 |  5.119822706s |
-| google_service_account |     1 |  2.889675972s |
-| random_id              |    10 |  2.305856125s |
-+------------------------+-------+---------------+
+Refresh Time for Whole Workspace: 8.071s
++------------------------------+-------+---------------------------+---------------+---------+---------+--------+
+| Resource Type                | Count | Average Time Per Resource | Average*Count | Minimum | Maximum | StdDev |
++------------------------------+-------+---------------------------+---------------+---------+---------+--------+
+| aviatrix_vpc                 |     4 |                    3.082s |        12.33s |  2.474s |  3.782s |  438ms |
+| aviatrix_controller_config   |     1 |                    3.745s |        3.745s |  3.186s |  4.066s |  397ms |
+| aviatrix_gateway             |     1 |                    1.974s |        1.974s |  1.798s |  2.189s |  162ms |
+| aviatrix_transit_gateway     |     1 |                     812ms |         812ms |   580ms |  1.067s |  199ms |
+| aviatrix_device_registration |     1 |                     578ms |         578ms |   188ms |   812ms |  277ms |
+| aviatrix_spoke_gateway       |     1 |                     163ms |         163ms |   161ms |   164ms |    2ms |
++------------------------------+-------+---------------------------+---------------+---------+---------+--------+
++------------------------------+----------------------------------------------------+----------------------------------------------------+
+| Resource Type                | Fastest                                            | Slowest                                            |
++------------------------------+----------------------------------------------------+----------------------------------------------------+
+| aviatrix_vpc                 | aviatrix_vpc.test_transit_vpc                      | aviatrix_vpc.vpc_a                                 |
+| aviatrix_controller_config   | aviatrix_controller_config.test                    | aviatrix_controller_config.test                    |
+| aviatrix_gateway             | aviatrix_gateway.test                              | aviatrix_gateway.test                              |
+| aviatrix_transit_gateway     | aviatrix_transit_gateway.test_transit              | aviatrix_transit_gateway.test_transit              |
+| aviatrix_device_registration | aviatrix_device_registration.device_registration_1 | aviatrix_device_registration.device_registration_1 |
+| aviatrix_spoke_gateway       | aviatrix_spoke_gateway.gateway_a                   | aviatrix_spoke_gateway.gateway_a                   |
++------------------------------+----------------------------------------------------+----------------------------------------------------+
 ```
 
 ## Usage

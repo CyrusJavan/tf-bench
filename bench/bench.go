@@ -89,8 +89,6 @@ type Report struct {
 func (r *Report) String() string {
 	t := table.NewWriter()
 	t2 := table.NewWriter()
-	t.SetTitle("Resource Type Refresh Statistics")
-	t2.SetTitle("Resource Type Fastest and Slowest")
 	if r.Config.EventLog {
 		t.Style().Format.Header = text.FormatDefault
 		t2.Style().Format.Header = text.FormatDefault
