@@ -1,6 +1,7 @@
 package bench
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"fmt"
@@ -295,9 +296,6 @@ Set --event-log=false flag to use the temporary directory measurement method.`, 
 				}
 			}
 		}
-		starts := map[string]tfEvent{}
-		ends := map[string]tfEvent{}
-		dec := json.NewDecoder(stdout)
 		bar := progressbar.NewOptions64(
 			int64(totalCount),
 			progressbar.OptionSetDescription(fmt.Sprintf("Iteration %d", i+1)),
@@ -315,20 +313,17 @@ Set --event-log=false flag to use the temporary directory measurement method.`, 
 		if err != nil {
 			logger.Debug("could not render blank progress bar", zap.Error(err))
 		}
-		for {
+		starts := map[string]tfEvent{}
+		ends := map[string]tfEvent{}
+		scanner := bufio.NewScanner(stdout)
+		for scanner.Scan() {
 			var event tfEvent
-			err := dec.Decode(&event)
-			if err == io.EOF {
-				// all done
-				break
-			}
+			err := json.Unmarshal(scanner.Bytes(), &event)
 			if err != nil {
-				buf := new(strings.Builder)
-				_, _ = io.Copy(buf, dec.Buffered())
-				logger.Error("could not decode JSON object from Terraform event log",
-					zap.String("decoder_buffer", buf.String()),
+				logger.Debug("could not decode JSON object from Terraform event log",
+					zap.String("line", scanner.Text()),
 					zap.Error(err))
-				break
+				continue
 			}
 			if event.Type == "refresh_start" {
 				starts[event.Hook.Resource.Addr] = event
