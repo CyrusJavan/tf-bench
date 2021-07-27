@@ -1,5 +1,6 @@
 # tf-bench
 Benchmark terraform refresh performance of the resources in your workspace and generate a report.
+![tf-bench-short](https://user-images.githubusercontent.com/8885202/127076367-1a3bd2f7-2dc5-4c4a-8005-966b342bcd25.gif)
 
 ## Example generated report
 ```
