@@ -36,8 +36,7 @@ const (
 )
 
 var (
-	tf15         = version.Must(version.NewVersion("v0.15"))
-	buildVersion = ""
+	tf15 = version.Must(version.NewVersion("v0.15"))
 )
 
 type TerraformRunner struct {
@@ -101,6 +100,7 @@ type Report struct {
 	ControllerVersion *goaviatrix.AviatrixVersion // ControllerVersion of the Aviatrix controller
 	Resources         []*ResourceReport           // Resources is the slice of individual resource measurements
 	Config            *Config                     // Config that this report was generated with
+	BuildVersion      string                      // BuildVersion of tf-bench
 }
 
 func (r *Report) String() string {
@@ -146,10 +146,10 @@ Refresh Time for Whole Workspace: %s
 	if r.TerraformVersion != nil {
 		terraformVer = "\nterraform version: v" + r.TerraformVersion.TerraformVersion
 	}
-	if buildVersion == "" {
-		buildVersion = "build time: " + time.Now().Format(time.RFC3339)
+	if r.BuildVersion == "" {
+		r.BuildVersion = "development-build"
 	}
-	report := fmt.Sprintf(reportTemplate, buildVersion, r.Timestamp.Format(time.RFC3339Nano),
+	report := fmt.Sprintf(reportTemplate, r.BuildVersion, r.Timestamp.Format(time.RFC3339Nano),
 		controllerVer, r.Config.Iterations, terraformVer, providerVersions,
 		r.TotalTime.Round(time.Millisecond), t.Render(), t2.Render())
 	return report

@@ -17,11 +17,14 @@ var (
 	VarFile               string
 	EventLog              bool
 	Verbose               bool
+	OnlyOutputVersion     bool
+	version               string
 )
 
 func init() {
 	rootCmd.Flags().BoolVar(&SkipControllerVersion, "skip-controller-version", false, "Skip adding controller version to generated report")
 	rootCmd.Flags().BoolVar(&EventLog, "event-log", true, "Use event log method of measuring refresh")
+	rootCmd.Flags().BoolVar(&OnlyOutputVersion, "version", false, "Output tf-bench version")
 	rootCmd.Flags().BoolVarP(&Verbose, "verbose", "v", false, "Enable debug logging")
 	rootCmd.Flags().IntVar(&Iterations, "iterations", 3, "How many times to run each refresh test. Higher number will be more accurate but slower")
 	rootCmd.Flags().StringVar(&VarFile, "var-file", "", "var-file to pass to terraform commands")
@@ -38,6 +41,10 @@ performance of the current terraform workspace.
 		return validateEnv(SkipControllerVersion)
 	},
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if OnlyOutputVersion {
+			fmt.Print(version)
+			return nil
+		}
 		cfg := &bench.Config{
 			SkipControllerVersion: SkipControllerVersion,
 			Iterations:            Iterations,
@@ -62,6 +69,10 @@ performance of the current terraform workspace.
 		if err != nil {
 			return err
 		}
+		if version == "" {
+			version = "development-build"
+		}
+		report.BuildVersion = version
 		reportString := report.String()
 		fmt.Println(reportString)
 		// Save report to file as well
