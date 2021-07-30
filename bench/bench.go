@@ -115,6 +115,8 @@ func ApplyBenchmark(cfg *Config, tfRunner *TerraformRunner, logger *zap.Logger) 
 			return nil, fmt.Errorf("could not initialize logger: %w", err)
 		}
 	}
+	_ = cfg
+	_ = tfRunner
 	return &ApplyReport{}, nil
 }
 
@@ -284,9 +286,9 @@ func eventLogRefreshBenchmark(cfg *Config, tfRunner *TerraformRunner, logger *za
 	}
 	report := newReport(cfg, tfRunner)
 	if report.TerraformVersion != nil {
-		v0_15_4, err1 := version.NewVersion("v0.15.4")
+		v0154, err1 := version.NewVersion("v0.15.4")
 		v, err2 := version.NewVersion(report.TerraformVersion.TerraformVersion)
-		if err1 == nil && err2 == nil && v.LessThan(v0_15_4) {
+		if err1 == nil && err2 == nil && v.LessThan(v0154) {
 			return nil, fmt.Errorf(`terraform version is too low to use event log measurement method. 
 Your terraform version is %s, event log measurement method requires at least v0.15.4.
 Set --event-log=false flag to use the temporary directory measurement method.`, report.TerraformVersion.TerraformVersion)
@@ -328,7 +330,7 @@ Set --event-log=false flag to use the temporary directory measurement method.`, 
 			progressbar.OptionSetWidth(10),
 			progressbar.OptionShowCount(),
 			progressbar.OptionOnCompletion(func() {
-				fmt.Fprint(os.Stdout, "\n")
+				_, _ = fmt.Fprint(os.Stdout, "\n")
 			}),
 			progressbar.OptionSpinnerType(14),
 			progressbar.OptionFullWidth(),
@@ -431,7 +433,9 @@ Set --event-log=false flag to use the temporary directory measurement method.`, 
 
 func resourceBenchmark(cfg *Config, resource *Resource, state []byte, tfv *TerraformVersion, tfRunner *TerraformRunner) (*ResourceReport, error) {
 	dir := os.TempDir()
-	defer os.RemoveAll(dir)
+	defer func(path string) {
+		_ = os.RemoveAll(path)
+	}(dir)
 	// Copy over any tfvars or tfvars.json files
 	_, _ = util.RunCommand("/bin/sh", "-c", fmt.Sprintf("cp -R *.tfvars *.tfvars.json %s", dir))
 	// Generate the modified TF file
@@ -449,7 +453,9 @@ func resourceBenchmark(cfg *Config, resource *Resource, state []byte, tfv *Terra
 	if err != nil {
 		return nil, fmt.Errorf("could not change dir: %w", err)
 	}
-	defer os.Chdir(pwd)
+	defer func(dir string) {
+		_ = os.Chdir(dir)
+	}(pwd)
 	// Write the modified tf file
 	err = os.WriteFile("main.tf", modifiedTf, 0644)
 	if err != nil {
@@ -512,10 +518,10 @@ func measureRefresh(dir string, parallelism, iterations int, varFile string, tfR
 		one, err := measureRefreshOnce(dir, parallelism, varFile, tfRunner)
 		done = true
 		time.Sleep(120 * time.Millisecond)
-		fmt.Print(one.Round(time.Millisecond).String() + " ")
 		if err != nil {
 			return 0, err
 		}
+		fmt.Print(one.Round(time.Millisecond).String() + " ")
 		total += one
 	}
 	return time.Duration(int64(total) / int64(iterations)), nil
@@ -530,7 +536,9 @@ func measureRefreshOnce(dir string, parallelism int, varFile string, tfRunner *T
 	if err != nil {
 		return 0, fmt.Errorf("could not change dir: %w", err)
 	}
-	defer os.Chdir(pwd)
+	defer func(dir string) {
+		_ = os.Chdir(dir)
+	}(pwd)
 	args := []string{
 		"refresh",
 		fmt.Sprintf("-parallelism=%d", parallelism),
@@ -626,11 +634,11 @@ func controllerVersion() (*goaviatrix.AviatrixVersion, error) {
 	if err != nil {
 		return nil, fmt.Errorf("could not initialize aviatrix client: %w", err)
 	}
-	_, version, err := client.GetCurrentVersion()
+	_, v, err := client.GetCurrentVersion()
 	if err != nil {
 		return nil, fmt.Errorf("could not get controller version: %w", err)
 	}
-	return version, nil
+	return v, nil
 }
 
 func terraformState(tfRunner *TerraformRunner) (*TerraformState, []byte, error) {
@@ -740,7 +748,7 @@ func eval(attr *hclwrite.Attribute, varFile string, sensitive bool) cty.Value {
 	if err != nil {
 		fmt.Println(err)
 	}
-	pipe.Close()
+	_ = pipe.Close()
 	err = console.Wait()
 	if err != nil {
 		fmt.Println(err)
