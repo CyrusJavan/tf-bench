@@ -93,7 +93,32 @@ type TerraformState struct {
 	}
 }
 
-type Report struct {
+type ApplyReport struct {
+	Timestamp         time.Time                   // Timestamp is the start of the benchmark
+	TotalTime         time.Duration               // TotalTime is the duration to `terraform apply`
+	TerraformVersion  *TerraformVersion           // TerraformVersion that is running the benchmark
+	ControllerVersion *goaviatrix.AviatrixVersion // ControllerVersion of the Aviatrix controller
+	Resources         []*ResourceReport           // Resources is the slice of individual resource measurements
+	Config            *Config                     // Config that this report was generated with
+	BuildVersion      string                      // BuildVersion of tf-bench
+}
+
+func (r *ApplyReport) String() string {
+	return ""
+}
+
+func ApplyBenchmark(cfg *Config, tfRunner *TerraformRunner, logger *zap.Logger) (*ApplyReport, error) {
+	if logger == nil {
+		var err error
+		logger, err = zap.NewProduction()
+		if err != nil {
+			return nil, fmt.Errorf("could not initialize logger: %w", err)
+		}
+	}
+	return &ApplyReport{}, nil
+}
+
+type RefreshReport struct {
 	Timestamp         time.Time                   // Timestamp is the start of the benchmark
 	TotalTime         time.Duration               // TotalTime is the duration to `terraform refresh` the entire workspace
 	TerraformVersion  *TerraformVersion           // TerraformVersion that is running the benchmark
@@ -103,7 +128,7 @@ type Report struct {
 	BuildVersion      string                      // BuildVersion of tf-bench
 }
 
-func (r *Report) String() string {
+func (r *RefreshReport) String() string {
 	t := table.NewWriter()
 	t2 := table.NewWriter()
 	if r.Config.EventLog {
@@ -124,7 +149,7 @@ func (r *Report) String() string {
 		}
 	}
 
-	reportTemplate := `tf-bench (%s) Report %s%s
+	reportTemplate := `tf-bench (%s) Refresh Report %s%s
 iterations per measurement: %d%s%s
 Refresh Time for Whole Workspace: %s
 %s
@@ -155,12 +180,12 @@ Refresh Time for Whole Workspace: %s
 	return report
 }
 
-func newReport(cfg *Config, tfRunner *TerraformRunner) *Report {
+func newReport(cfg *Config, tfRunner *TerraformRunner) *RefreshReport {
 	tv, err := terraformVersion(tfRunner)
 	if err != nil {
 		fmt.Printf("WARN: Could not find terraform version: %v\n", err)
 	}
-	report := Report{
+	report := RefreshReport{
 		Timestamp:        time.Now(),
 		TerraformVersion: tv,
 		Config:           cfg,
@@ -175,7 +200,7 @@ func newReport(cfg *Config, tfRunner *TerraformRunner) *Report {
 	return &report
 }
 
-func Benchmark(cfg *Config, tfRunner *TerraformRunner, logger *zap.Logger) (*Report, error) {
+func RefreshBenchmark(cfg *Config, tfRunner *TerraformRunner, logger *zap.Logger) (*RefreshReport, error) {
 	if logger == nil {
 		var err error
 		logger, err = zap.NewProduction()
@@ -184,12 +209,12 @@ func Benchmark(cfg *Config, tfRunner *TerraformRunner, logger *zap.Logger) (*Rep
 		}
 	}
 	if cfg.EventLog {
-		return eventLogBenchmark(cfg, tfRunner, logger)
+		return eventLogRefreshBenchmark(cfg, tfRunner, logger)
 	}
-	return tempDirBenchmark(cfg, tfRunner)
+	return tempDirRefreshBenchmark(cfg, tfRunner)
 }
 
-func tempDirBenchmark(cfg *Config, tfRunner *TerraformRunner) (*Report, error) {
+func tempDirRefreshBenchmark(cfg *Config, tfRunner *TerraformRunner) (*RefreshReport, error) {
 	tfstate, state, err := terraformState(tfRunner)
 	if err != nil {
 		return nil, err
@@ -217,7 +242,7 @@ func tempDirBenchmark(cfg *Config, tfRunner *TerraformRunner) (*Report, error) {
 	fmt.Println()
 	report.TotalTime = t
 
-	// Benchmark each resource type individually
+	// RefreshBenchmark each resource type individually
 	for r, count := range resourceTypes {
 		fmt.Printf("%s measurement:  ", r)
 		rr, err := resourceBenchmark(cfg, &Resource{Name: r, Count: count}, state, report.TerraformVersion, tfRunner)
@@ -239,8 +264,8 @@ func tempDirBenchmark(cfg *Config, tfRunner *TerraformRunner) (*Report, error) {
 	return report, nil
 }
 
-func eventLogBenchmark(cfg *Config, tfRunner *TerraformRunner, logger *zap.Logger) (*Report, error) {
-	logger.Debug("Begin eventLogBenchmark")
+func eventLogRefreshBenchmark(cfg *Config, tfRunner *TerraformRunner, logger *zap.Logger) (*RefreshReport, error) {
+	logger.Debug("Begin eventLogRefreshBenchmark")
 	logger.Debug("Getting terraform state")
 	tfstate, _, err := terraformState(tfRunner)
 	if err != nil {

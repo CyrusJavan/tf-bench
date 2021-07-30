@@ -39,7 +39,7 @@ func refreshRun(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("could not initialize production logger: %w", err)
 		}
 	}
-	report, err := bench.Benchmark(cfg, bench.SystemTerraform, logger)
+	report, err := bench.RefreshBenchmark(cfg, bench.SystemTerraform, logger)
 	if err != nil {
 		return err
 	}
@@ -50,7 +50,7 @@ func refreshRun(cmd *cobra.Command, args []string) error {
 	reportString := report.String()
 	fmt.Println(reportString)
 	// Save report to file as well
-	filename := "tf-bench-report-" + report.Timestamp.Format(time.RFC3339)
+	filename := "tf-bench-refresh-report-" + report.Timestamp.Format(time.RFC3339)
 	err = os.WriteFile(filename, []byte(reportString), 0644)
 	if err != nil {
 		return fmt.Errorf("could not write report to file. The report has also been output to the console please recover the report from there: %w", err)

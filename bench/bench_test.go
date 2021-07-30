@@ -86,7 +86,7 @@ resource "random_id" "id" {
 			require.NoError(t, err)
 			_, err = terraform.Run("apply", "-auto-approve")
 			require.NoError(t, err)
-			report, err := Benchmark(tc.cfg, terraform, nil)
+			report, err := RefreshBenchmark(tc.cfg, terraform, nil)
 			require.NoError(t, err)
 			t.Log(report)
 		})

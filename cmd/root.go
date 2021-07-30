@@ -26,6 +26,9 @@ func init() {
 	rootCmd.AddCommand(refreshCmd)
 	refreshCmd.Flags().IntVar(&Iterations, "iterations", 3, "How many times to run each refresh test. Higher number will be more accurate but slower")
 	refreshCmd.Flags().BoolVar(&EventLog, "event-log", true, "Use event log method of measuring refresh")
+
+	// tf-bench apply
+	rootCmd.AddCommand(applyCmd)
 }
 
 var rootCmd = &cobra.Command{
